@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "Nodya"
+dynamic = ["version"]
+description = ""
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "aio-pika>=10.0.1",
+    "alembic>=1.18.5",
+    "asyncpg>=0.31.0",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.2",
+    "redis>=8.0.1",
+    "sqlalchemy>=2.0.51",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.version.raw-options]
+local_scheme = "no-local-version"
