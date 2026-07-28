@@ -16,7 +16,7 @@ def get_logger(name: str | None = None) -> logging.Logger:
         if frame and frame.f_back:
             name = frame.f_back.f_globals.get("__name__", "unknown")
 
-    root_prefix = "syncnode"
+    root_prefix = "nodya"
 
     # Если модуль запущен напрямую, заменяем __main__ на имя папки для красоты
     if name == "__main__":

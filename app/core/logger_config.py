@@ -20,7 +20,7 @@ def setup_logging(
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # Корневой логгер приложения
-    root_logger = logging.getLogger("syncnode")
+    root_logger = logging.getLogger("nodya")
     root_logger.setLevel(getattr(logging, level.upper()))
 
     # Очищаем существующие хендлеры

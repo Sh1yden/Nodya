@@ -1,7 +1,7 @@
-from typing import Any, Dict
+from typing import Any, Dict, Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import BigInteger, Uuid, ForeignKey
+from sqlalchemy import BigInteger, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -20,10 +20,7 @@ class Users(Base):
     )
     telegram_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     discord_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    browser_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("users.user_id"), nullable=False
-    )
-    cli_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("users.user_id"), nullable=False
-    )
+    username: Mapped[str] = mapped_column(String(20), nullable=False)
+    passwd_hash: Mapped[str] = mapped_column(String, nullable=False)
+    role: Mapped[Literal["owner", "user"]] = mapped_column(String, nullable=False)
     settings: Mapped[Dict[str, Any]] = mapped_column(JSONB, default=dict)
