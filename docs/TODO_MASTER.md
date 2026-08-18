@@ -5,33 +5,33 @@
 
 ---
 
-## **Этап 0: Фикс того, что уже написано**
+## **Этап 0: - [x] Фикс того, что уже написано**
 
 Блокирующие баги в существующем коде. Без этого ни миграции, ни регистрация, ни запуск не работают.
 
-### 0.1 `app/core/__init__.py` — опечатка `all`
+### 0.1 - [x] `app/core/__init__.py` — опечатка `all`
 - **Файл:** `app/core/__init__.py`
 - **Что сделать:** Заменить `all = [...]` на `__all__ = [...]`
 - **Затрагивает:** импорт `from app.core import *`
 - **Приоритет:** высокий (код не работает как задумано)
 
-### 0.2 `app/core/logger.py` — `root_prefix = "syncnode"`
+### 0.2 - [x] `app/core/logger.py` — `root_prefix = "syncnode"`
 - **Файл:** `app/core/logger.py`, строка 19
 - **Что сделать:** Заменить `"syncnode"` на `"nodya"`
 - **Вариант:** Вынести в `SettingsSchema` как `LOG_PREFIX`
 - **Приоритет:** средний (косметика, но ломает namespace логов)
 
-### 0.3 Модель `Users` — убрать `browser_id`, `cli_id`
+### 0.3 - [x] Модель `Users` — убрать `browser_id`, `cli_id`
 - **Файл:** `app/brain/models/Users.py`
 - **Проблема:** `browser_id: Mapped[UUID]` и `cli_id: Mapped[UUID]` — self-referencing FK с `NOT NULL`. Нельзя вставить первого пользователя
 - **Что сделать:**
   1. Удалить поля `browser_id`, `cli_id`
-  2. Добавить поля (если ещё нет): `created_at`, `email` (nullable/unique)
+  2. Добавить поля (если ещё нет): `created_at`
   3. Убедиться, что `passwd_hash` существует (уже есть)
 - **Текущее состояние Users:** `user_id`, `telegram_id`, `discord_id`, `username`, `passwd_hash`, `role`, `settings`, ~~`browser_id`~~, ~~`cli_id`__
-- **Добавить:** `email: Mapped[str | None]`, `created_at: Mapped[datetime]`
+- **Добавить:** `created_at: Mapped[datetime]`
 
-### 0.4 Модель `AuthTokens` — завершить поля
+### 0.4 - [x] Модель `AuthTokens` — завершить поля
 - **Файл:** `app/brain/models/AuthTokens.py`
 - **Проблема:** `token_hash`, `created_at`, `last_used_at`, `revoked_at` закомментированы
 - **Что сделать:** Раскомментировать и реализовать:
@@ -43,12 +43,12 @@
   ```
 - **Импорт:** datetime, func из sqlalchemy
 
-### 0.5 `AuthTokens` не импортируется в `models/__init__.py`
+### 0.5 - [x] `AuthTokens` не импортируется в `models/__init__.py`
 - **Файл:** `app/brain/models/__init__.py`
 - **Что сделать:** Добавить `AuthTokens` в `__all__` и импорт
 - **Текущий список:** `["Base", "Users", "HardFacts", "AuditLogs"]` -> `["Base", "Users", "AuthTokens", "HardFacts", "AuditLogs"]`
 
-### 0.6 `HardFactsRepo.search_last_updated` — пустой стаб
+### 0.6 - [x] `HardFactsRepo.search_last_updated` — пустой стаб
 - **Файл:** `app/brain/repositories/HardFactsRepo.py`
 - **Что сделать:** Реализовать метод:
   ```python
@@ -64,23 +64,23 @@
   ```
 - **Добавить импорты:** `select` из sqlalchemy, `UUID` из uuid
 
-### 0.7 Пересоздать init-миграцию
+### 0.7 - [x] Пересоздать init-миграцию
 - Старая миграция (`438cf681b3d4`) содержит неправильную схему (с `browser_id`, `cli_id`)
 - **Что сделать:**
   1. Удалить или откатить старую миграцию
   2. Создать новую: `alembic revision --autogenerate -m "init_schema"`
   3. Проверить, что `upgrade()` создаёт правильные таблицы (Users без browser_id/cli_id, AuthTokens с правильными полями)
 
-### 0.8 `app/brain/memory/short/redis.py` — пустой класс
+### 0.8 - [x] `app/brain/memory/short/redis.py` — пустой класс
 - Реализацию отложить на Этап 2, но файл уже существует — убрать заглушку или задепрекейтить
 
 ---
 
-## **Этап 1: Инфраструктурный фундамент**
+## **Этап 1: - [x] Инфраструктурный фундамент**
 
 Dockerfile, docker-compose, pyproject.toml — всё, что нужно для запуска.
 
-### 1.1 Dockerfile
+### 1.1 - [x] Dockerfile
 - **Файл:** `Dockerfile` (сейчас пустой)
 - **Что сделать:**
   ```dockerfile
@@ -98,7 +98,7 @@ Dockerfile, docker-compose, pyproject.toml — всё, что нужно для 
   ```
 - **Образ:** мультистейдж, UV для зависимостей, минимальный финальный слой
 
-### 1.2 docker-compose — добавить RabbitMQ
+### 1.2 - [x] docker-compose — добавить RabbitMQ
 - **Файл:** `docker-compose.yml`
 - **Что добавить:**
   ```yaml
@@ -121,7 +121,7 @@ Dockerfile, docker-compose, pyproject.toml — всё, что нужно для 
       - rabbitmq_data:/var/lib/rabbitmq
   ```
 
-### 1.3 docker-compose — добавить Qdrant
+### 1.3 - [x] docker-compose — добавить Qdrant
 - **Файл:** `docker-compose.yml`
 - **Что добавить:**
   ```yaml
@@ -142,7 +142,7 @@ Dockerfile, docker-compose, pyproject.toml — всё, что нужно для 
 - **Добавить volumes:** `rabbitmq_data:`, `qdrant_data:`
 - **Добавить depends_on в app:** `rabbitmq`, `qdrant`
 
-### 1.4 pyproject.toml — добавить зависимости
+### 1.4 - [x] pyproject.toml — добавить зависимости
 - **Файл:** `pyproject.toml`
 - **Что добавить в `dependencies`:**
   ```
@@ -158,7 +158,7 @@ Dockerfile, docker-compose, pyproject.toml — всё, что нужно для 
   dev = ["pytest>=8.0", "pytest-asyncio>=0.25", "ruff>=0.9", "pytest-cov>=6.0"]
   ```
 
-### 1.5 `SettingsSchema` — добавить недостающие поля
+### 1.5 - [x] `SettingsSchema` — добавить недостающие поля
 - **Файл:** `app/core/config.py`
 - **Что добавить:**
   - `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USER`, `RABBITMQ_PASSWORD`
@@ -169,13 +169,13 @@ Dockerfile, docker-compose, pyproject.toml — всё, что нужно для 
   - `OWNER_EMAIL`
   - `computed_field` для `rabbitmq_url`
 
-### 1.6 `.env.example` — актуализировать
+### 1.6 - [x] `.env.example` — актуализировать
 - **Файл:** `.env.example`
 - **Что сделать:** Добавить все недостающие переменные с комментариями
 
 ---
 
-## **Этап 2: Redis-слой памяти (short-term)**
+## **Этап 2: - [x] Redis-слой памяти (short-term)**
 
 ### 2.1 `app/brain/memory/short/redis.py` — `RedisClient`
 

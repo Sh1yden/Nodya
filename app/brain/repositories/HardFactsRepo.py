@@ -19,6 +19,16 @@ class HardFactsRepo(BaseRepo[HardFacts]):
 
         return list(result.all())
 
-    def search_last_updated(self):
+    async def search_last_updated(
+        self, user_id: Any, limit: int = 20
+    ) -> list[HardFacts]:
         """"""
-        pass
+        stmt = (
+            select(self.model)
+            .where(self.model.user_id == user_id)
+            .order_by(self.model.updated_at.desc())
+            .limit(limit)
+        )
+        result = self.session.scalars(stmt)
+
+        return list(result.all())
