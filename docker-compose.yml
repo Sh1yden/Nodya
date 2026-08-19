@@ -8,6 +8,10 @@ services:
       - REDIS_HOST=redis
       - POSTGRES_PORT=5432
       - REDIS_PORT=6379
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
     depends_on:
       postgres:
         condition: service_healthy

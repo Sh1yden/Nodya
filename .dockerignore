@@ -1,0 +1,32 @@
+# VCS / meta
+.git
+.gitignore
+.github
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Secrets — .env никогда не должен попадать в образ
+.env
+.env.*
+!.env.example
+
+# Не нужно внутри образа: только для чтения разработчиком
+docs/
+tests/
+README.md
+CHANGELOG.md
+.python-version
+Dockerfile
+docker-compose.yml
+
+# ВАЖНО: не добавлять сюда app/brain/memory/init/prompts/*.md —
+# ME.md/RULES.md/CREATOR.md/SLEEP.md читаются рантаймом.

@@ -37,9 +37,15 @@
 - **Что сделать:** Раскомментировать и реализовать:
   ```python
   token_hash: Mapped[str] = mapped_column(String, nullable=False)
-  created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-  last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-  revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+  created_at: Mapped[datetime] = mapped_column(
+      DateTime(timezone=True), server_default=func.now(), nullable=False
+  )
+  last_used_at: Mapped[datetime | None] = mapped_column(
+      DateTime(timezone=True), nullable=True
+  )
+  revoked_at: Mapped[datetime | None] = mapped_column(
+      DateTime(timezone=True), nullable=True
+  )
   ```
 - **Импорт:** datetime, func из sqlalchemy
 
@@ -190,51 +196,54 @@ Dockerfile, docker-compose, pyproject.toml — всё, что нужно для 
 # nodya:debounce:{user_id}      -> List
 # nodya:agent_online:{user_id}   -> String (SET with TTL 15s)
 
+
 class RedisClient:
     def __init__(self, redis_url: str):
         self._redis = Redis.from_url(redis_url, db=0)
-    
+
     async def get_state(self, user_id: UUID) -> UserState | None:
         """Читает Hash nodya:state:{user_id}.
         Возвращает None если ключа нет."""
-    
-    async def set_state(self, user_id: UUID, status: str, ttl: int | None = None) -> None:
+
+    async def set_state(
+        self, user_id: UUID, status: str, ttl: int | None = None
+    ) -> None:
         """Пишет status в Hash.
         Если ttl указан — устанавливает TTL на ключ."""
-    
+
     async def get_state_field(self, user_id: UUID, field: str) -> str | None:
         """Получить одно поле из state Hash."""
-    
+
     async def push_context(self, user_id: UUID, message: ContextMessage) -> None:
         """LPUSH + LTRIM (до N=100) + EXPIRE (24ч)."""
-    
+
     async def get_context(self, user_id: UUID, limit: int = 20) -> list[ContextMessage]:
         """LRANGE 0 limit-1, вернуть в хронологическом порядке."""
-    
+
     async def clear_context(self, user_id: UUID) -> None:
         """DELETE ключа контекста."""
-    
+
     async def acquire_lock(self, user_id: UUID, ttl: int = 30) -> bool:
         """SET NX EX. Возвращает True/False."""
-    
+
     async def release_lock(self, user_id: UUID) -> None:
         """Снимает лок (через Lua-скрипт или проверку владельца)."""
-    
+
     async def is_locked(self, user_id: UUID) -> bool:
         """EXISTS ключа блокировки."""
-    
+
     async def push_debounce(self, user_id: UUID, text: str) -> int:
         """Добавить в буфер debounce, вернуть размер буфера."""
-    
+
     async def pop_debounce_batch(self, user_id: UUID) -> list[str]:
         """Атомарно: LRANGE + DELETE. Вернуть всё."""
-    
+
     async def set_agent_online(self, user_id: UUID, ttl: int = 15) -> None:
         """SET nodya:agent_online:{user_id} 1 EX {ttl}."""
-    
+
     async def is_agent_online(self, user_id: UUID) -> bool:
         """EXISTS nodya:agent_online:{user_id}."""
-    
+
     async def close(self) -> None:
         await self._redis.close()
 ```
@@ -306,28 +315,31 @@ class RedisClient:
 ```python
 class WebSocketManager:
     """Менеджер WebSocket-соединений.
-    
+
     Хранит мапу user_id -> list[WebSocket].
     Позволяет отправлять проактивные сообщения от Ноди клиенту.
     """
+
     def __init__(self):
         self._connections: dict[UUID, list[WebSocket]] = {}
-    
+
     async def connect(self, user_id: UUID, ws: WebSocket) -> None:
         """Принять соединение, добавить в мапу."""
-    
+
     async def disconnect(self, user_id: UUID, ws: WebSocket) -> None:
         """Удалить сокет из мапы. Если список пуст — удалить ключ."""
-    
+
     async def send_to_user(self, user_id: UUID, message: str | dict) -> None:
         """Отправить сообщение через ВСЕ открытые сокеты пользователя."""
-    
-    async def send_to_one(self, user_id: UUID, ws: WebSocket, message: str | dict) -> None:
+
+    async def send_to_one(
+        self, user_id: UUID, ws: WebSocket, message: str | dict
+    ) -> None:
         """Отправить сообщение через конкретный сокет."""
-    
+
     async def broadcast(self, message: str | dict) -> None:
         """Отправить всем подключённым клиентам (осторожно, только для owner?)."""
-    
+
     async def close_all(self) -> None:
         """Закрыть все соединения (graceful shutdown)."""
 ```
@@ -369,33 +381,40 @@ class IncomingMessage(BaseModel):
     text: str
     received_at: datetime
 
+
 class OutgoingMessage(BaseModel):
     user_id: UUID
     channel: str
     text: str
     delay_until: datetime | None = None  # для отложенных ответов (proactive decision)
 
+
 class UserState(BaseModel):
     status: Literal["idle", "thinking", "sleeping"]
     last_active_at: datetime
+
 
 class ContextMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str
     timestamp: datetime
 
+
 class PromptContext(BaseModel):
     history: list[ContextMessage]
     facts: list[HardFacts]
     vector_hits: list[VectorHit]
 
+
 class LLMResponse(BaseModel):
     text: str | None
     tool_calls: list[ToolCall]
 
+
 class ToolCall(BaseModel):
     name: str
     arguments: dict
+
 
 class SkillResult(BaseModel):
     success: bool
@@ -469,12 +488,10 @@ class LLMProvider(ABC):
         self,
         prompt: str,
         tools: list[ToolSpec] | None = None,
-    ) -> LLMResponse:
-        ...
-    
+    ) -> LLMResponse: ...
+
     @abstractmethod
-    async def embed(self, texts: list[str]) -> list[list[float]]:
-        ...
+    async def embed(self, texts: list[str]) -> list[list[float]]: ...
 ```
 
 ### 5.2 `app/brain/llm_choice/gemini.py`
@@ -499,13 +516,20 @@ class LLMRouter:
     def __init__(self, gemini: GeminiProvider, openrouter: OpenRouterProvider):
         self._primary = gemini
         self._fallback = openrouter
-    
-    def get_provider(self, role: Literal["dialogue", "compact_session", "background_parser", "vector_search"]) -> LLMProvider:
+
+    def get_provider(
+        self,
+        role: Literal[
+            "dialogue", "compact_session", "background_parser", "vector_search"
+        ],
+    ) -> LLMProvider:
         """Выбор провайдера в зависимости от роли и настроек."""
-    
+
     async def generate_with_fallback(
         self,
-        role: Literal["dialogue", "compact_session", "background_parser", "vector_search"],
+        role: Literal[
+            "dialogue", "compact_session", "background_parser", "vector_search"
+        ],
         prompt: str,
         tools: list[ToolSpec] | None = None,
     ) -> LLMResponse:
@@ -522,17 +546,22 @@ class SkillDefinition:
     input_schema: type[BaseModel]
     handler: Callable[..., Awaitable[SkillResult]]
 
+
 class SkillRegistry:
     def __init__(self, audit_logs_repo: AuditLogsRepo):
         self._skills: dict[str, SkillDefinition] = {}
-    
+
     def register(self, skill: SkillDefinition) -> None:
         """Зарегистрировать skill."""
-    
-    def list_available(self, user: Users, deployment: DeploymentConfig) -> list[SkillDefinition]:
+
+    def list_available(
+        self, user: Users, deployment: DeploymentConfig
+    ) -> list[SkillDefinition]:
         """Фильтр по user.role + deployment config."""
-    
-    async def dispatch(self, user: Users, deployment: DeploymentConfig, name: str, args: dict) -> SkillResult:
+
+    async def dispatch(
+        self, user: Users, deployment: DeploymentConfig, name: str, args: dict
+    ) -> SkillResult:
         """
         1. Проверка существования skill
         2. Проверка прав (дублирующая — не доверять list_available)
@@ -602,7 +631,7 @@ class ChannelSender(ABC):
 async def proactive_decision(user: Users) -> ProactiveDecision:
     """
     Принимает решение о том, как реагировать на сообщение.
-    
+
     Логика (из tldraw):
     1. Проверить state пользователя (из Redis)
     2. Если state == "thinking" -> delay (повторная попытка через 30с)
@@ -610,9 +639,10 @@ async def proactive_decision(user: Users) -> ProactiveDecision:
        - 70% ответить сейчас
        - 20% отложить (рандом 5мин-2ч)
        - 10% пропустить (сообщение сохранено в контекст, но ответ не генерируется)
-    
+
     Возвращает ProactiveDecision {action, delay_seconds}
     """
+
 
 class ProactiveDecision(BaseModel):
     action: Literal["now", "delay", "skip"]
@@ -767,7 +797,7 @@ async def retry_with_backoff(
 
 ---
 
-## **Этап 11: Nodya Agent**
+## - [?] (ПЕРЕСМОТРЕТЬ blacklist!!! Очень легко обходиться, искать другое решение.) **Этап 11: Nodya Agent**
 
 ### 11.1 `shared/schemas.py`
 ```python
@@ -775,6 +805,7 @@ class SkillRequest(BaseModel):
     request_id: UUID
     skill_name: str
     args: dict
+
 
 class SkillResult(BaseModel):
     request_id: UUID

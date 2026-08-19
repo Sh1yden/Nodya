@@ -455,8 +455,9 @@ class Worker:
     Бесконечный цикл: consume -> handle -> ACK.
     Не имеет доступа к HTTP, не имеет прямого доступа к клиентам.
     """
-    - run()                # Запуск consumer на incoming_messages
-    - handle_message(msg)  # Полный lifecycle сообщения:
+
+    -run()  # Запуск consumer на incoming_messages
+    -handle_message(msg)  # Полный lifecycle сообщения:
     #   1. resolve_user (по tg_id/ds_id — поиск или создание)
     #   2. debounce: pop_debounce_batch(user_id)
     #   3. acquire_lock(user_id)
@@ -469,10 +470,10 @@ class Worker:
     #   10. publish OutgoingMessage
     #   11. release_lock(user_id)
     #   12. ACK
-    - resolve_user(ch, id)  # Поиск/создание пользователя в БД
-    - build_context(uid)    # Параллельный сбор контекста
-    - proactive_decision()  # Решение: отвечать/отложить/пропустить
-    - assemble_system_prompt(user, context)
+    -resolve_user(ch, id)  # Поиск/создание пользователя в БД
+    -build_context(uid)  # Параллельный сбор контекста
+    -proactive_decision()  # Решение: отвечать/отложить/пропустить
+    -assemble_system_prompt(user, context)
 ```
 
 ### 5.4 LLM-слой (`app/brain/llm_choice/`)
@@ -480,40 +481,43 @@ class Worker:
 ```python
 class LLMProvider(ABC):
     """Абстрактный провайдер LLM."""
+
     @abstractmethod
     async def generate(
         self, prompt: str, tools: list[ToolSpec] | None = None
-    ) -> LLMResponse:
-        ...
+    ) -> LLMResponse: ...
+
 
 class GeminiProvider(LLMProvider):
     """Google AI Studio Gemini API."""
 
+
 class OpenRouterProvider(LLMProvider):
     """OpenRouter API (fallback)."""
+
 
 class LLMRouter:
     """
     Маршрутизация по 4 ролям (из tldraw-заметок):
-    
+
     Роль D (Dialogue) — "Good нейросети"
         Модель: Gemini 3.5 Flash (primary) / Gemini 3.1 Flash Lite (fallback)
         Назначение: Основной диалог с пользователем. Быстрый ответ, tool calling
-    
+
     Роль CS (Compact-Session / Sleep) — "Best нейросети"
         Модель: Gemini 3.6 Flash
         Назначение: Извлечение фактов из контекста, компрессия памяти,
                     consolidation. Медленнее, но точнее — "спит" и анализирует
-    
+
     Роль BP (Background-Parser) — "Local || free"
         Модель: Gemma 4 (31B|26B) через OpenRouter (free tier)
         Назначение: Парсинг RSS/TG-каналов, фильтр релевантности.
                     Не требует высокой точности, важна бесплатность/локал
-    
+
     Роль VS (Vector-Search) — "Embedding models"
         Модель: Gemini Embedding 2 / OpenRouter embedding API
         Назначение: Перевод текста в векторные эмбеддинги для Qdrant
-    
+
     Fallback: При недоступности primary -> OpenRouter (тот же уровень модели)
     """
 ```
@@ -552,6 +556,7 @@ class SkillDefinition:
     tier: Literal["safe", "elevated", "sandboxed", "system"]
     input_schema: type[BaseModel]
     handler: Callable[..., Awaitable[SkillResult]]
+
 
 class SkillRegistry:
     """
@@ -690,7 +695,7 @@ class SkillRegistry:
 class SettingsSchema(BaseSettings):
     # --- Логирование ---
     LOG_LEVEL: str = "DEBUG"
-    
+
     # --- PostgreSQL ---
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5434
@@ -698,44 +703,46 @@ class SettingsSchema(BaseSettings):
     POSTGRES_PASSWORD: str = "postgres"
     POSTGRES_DB: str = "postgres"
     POSTGRES_ASYNCPG: str = "asyncpg"  # драйвер
-    
+
     # --- Redis ---
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6381
-    
+
     # --- RabbitMQ ---
     RABBITMQ_HOST: str = "localhost"
     RABBITMQ_PORT: int = 5672
     RABBITMQ_USER: str = "guest"
     RABBITMQ_PASSWORD: str = "guest"
-    
+
     # --- Qdrant ---
     QDRANT_HOST: str = "localhost"
     QDRANT_PORT: int = 6333
-    
+
     # --- LLM ---
     GEMINI_API_KEY: str = ""
     OPENROUTER_API_KEY: str = ""
-    
+
     # --- Telegram ---
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_WEBHOOK_URL: str = ""
-    
+
     # --- Skills ---
     SYSTEM_SKILLS_ENABLED: bool = False
     SANDBOX_ENABLED: bool = True
-    
+
     # --- Owner ---
-    OWNER_EMAIL: str = ""  # Первый зарегистрировавшийся с этим email получает role=owner
-    
+    OWNER_EMAIL: str = (
+        ""  # Первый зарегистрировавшийся с этим email получает role=owner
+    )
+
     @computed_field
     @property
     def postgres_url(self) -> str: ...
-    
+
     @computed_field
     @property
     def redis_url(self) -> str: ...
-    
+
     @computed_field
     @property
     def rabbitmq_url(self) -> str: ...

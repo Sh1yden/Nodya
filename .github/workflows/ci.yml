@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  GEMINI_API_KEY: dummy
+  OPENROUTER_API_KEY: dummy
+  TELEGRAM_BOT_TOKEN: dummy
+  TELEGRAM_WEBHOOK_URL: dummy
+
+jobs:
+  # Быстрый job: линтер + импорт всех пакетов. Не трогает БД,
+  # выполняется секунды. Ловит именно то, что было руками:
+  # битый импорт, пропущенный await, синтаксические ошибки.
+  lint-and-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Import smoke test
+        run: |
+          uv run python -c "
+          import app.brain.models
+          import app.brain.repositories
+          import app.brain.memory.short.redis
+          import app.core
+          print('All core packages import cleanly')
+          "
+
+  # Отдельный job: реальный Postgres поднимается как service-контейнер
+  # (GitHub Actions сам его стартует и убьёт после job'а). Проверяем,
+  # что миграция реально накатывается и что она не разошлась с моделями.
+  migrations:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: nodya_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: nodya_ci
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras
+
+      - name: Apply migrations
+        run: uv run alembic upgrade head
+
+      - name: Check models match migrations
+        run: uv run alembic check
+
+  # Появится, когда напишешь тесты по Этапу 9 из TODO_MASTER.md —
+  # тот же паттерн service-контейнеров, что и в job "migrations".
+  # tests:
+  #   runs-on: ubuntu-latest
+  #   needs: [lint-and-smoke, migrations]
+  #   services:
+  #     postgres: ...
+  #     redis:
+  #       image: redis:8-alpine
+  #       ports: ["6379:6379"]
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: astral-sh/setup-uv@v3
+  #     - run: uv sync --frozen --all-extras
+  #     - run: uv run pytest

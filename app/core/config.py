@@ -54,7 +54,7 @@ class SettingsSchema(BaseSettings):
     @property
     def rabbitmq_url(self) -> str:
         return (
-            f"ampq://"
+            f"amqp://"
             f"{self.RABBITMQ_USER}:{self.RABBITMQ_PASSWORD}@"
             f"{self.RABBITMQ_HOST}:{self.RABBITMQ_PORT}/virtual_host"
         )

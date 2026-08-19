@@ -1,20 +1,21 @@
-Format Dockerfiles and shell commands within RUN steps. If no files are specified, input is read from stdin.
+FROM python:3.13-slim AS builder
 
-Usage:
-  dockerfmt [Dockerfile...] [flags]
-  dockerfmt [command]
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-Available Commands:
-  completion  Generate the autocompletion script for the specified shell
-  help        Help about any command
-  version     Print the version number of dockerfmt
+WORKDIR /app
 
-Flags:
-  -c, --check             Check if the file(s) are formatted
-  -h, --help              help for dockerfmt
-  -i, --indent uint       Number of spaces to use for indentation (default 4)
-  -n, --newline           End the file with a trailing newline
-  -s, --space-redirects   Redirect operators will be followed by a space
-  -w, --write             Write the formatted output back to the file(s)
+COPY pyproject.toml uv.lock ./
+RUN uv sync --no-dev --frozen
 
-Use "dockerfmt [command] --help" for more information about a command.
+FROM python:3.13-slim AS runtime
+
+WORKDIR /app
+
+COPY --from=builder /app/.venv .venv
+COPY . .
+
+ENV PATH="/app/.venv/bin:$PATH"
+
+EXPOSE 8014
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8014"]

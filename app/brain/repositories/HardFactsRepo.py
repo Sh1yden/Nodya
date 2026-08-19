@@ -22,13 +22,13 @@ class HardFactsRepo(BaseRepo[HardFacts]):
     async def search_last_updated(
         self, user_id: Any, limit: int = 20
     ) -> list[HardFacts]:
-        """"""
+        """Return the most recently updated facts for a given user."""
         stmt = (
             select(self.model)
             .where(self.model.user_id == user_id)
             .order_by(self.model.updated_at.desc())
             .limit(limit)
         )
-        result = self.session.scalars(stmt)
+        result = await self.session.scalars(stmt)
 
         return list(result.all())
