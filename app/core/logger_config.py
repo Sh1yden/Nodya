@@ -1,9 +1,9 @@
-import inspect
 import logging
 import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import ClassVar
 
 
 def setup_logging(
@@ -43,7 +43,9 @@ def setup_logging(
         counter = 1
         while log_filepath.exists():
             counter += 1
-            log_filename = f"{datetime.now().strftime('%Y-%m-%d')}-{counter:02d}.jsonl"
+            log_filename = (
+                f"{datetime.now().strftime('%Y-%m-%d')}-{counter:02d}.jsonl"
+            )
             log_filepath = log_dir / log_filename
 
         file_handler = logging.FileHandler(log_filepath, encoding="utf-8")
@@ -86,7 +88,7 @@ class Colors:
 class ColoredConsoleFormatter(logging.Formatter):
     """Кастомный форматтер для цветного вывода в консоль"""
 
-    LEVEL_COLORS = {
+    LEVEL_COLORS: ClassVar[dict[str, str]] = {
         "DEBUG": Colors.CYAN,
         "INFO": Colors.GREEN,
         "WARNING": Colors.YELLOW,
@@ -95,21 +97,14 @@ class ColoredConsoleFormatter(logging.Formatter):
     }
 
     def format(self, record: logging.LogRecord) -> str:
-        stack = inspect.stack()
-        caller_frame = stack[2].frame
-
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         level = record.levelname
-        filename = os.path.basename(record.pathname) if record.pathname else None
+        filename = (
+            os.path.basename(record.pathname) if record.pathname else None
+        )
         color = self.LEVEL_COLORS.get(record.levelname, Colors.RESET)
 
         full_module = record.name
-        module = record.module
-        # module = inspect.getmodule(
-        #     caller_frame
-        # ).__name__  # pyright: ignore[reportOptionalMemberAccess]
-        cls_obj = caller_frame.f_locals.get("self", None)
-        # cls_name = cls_obj.__class__.__name__ if cls_obj else None
         deff = record.funcName
         message = record.getMessage()
 
@@ -118,8 +113,6 @@ class ColoredConsoleFormatter(logging.Formatter):
             f"{color}{level:<8}{Colors.RESET} | "
             f"{Colors.FILENAME_COLOR}{filename}{Colors.RESET} | "
             f"{Colors.MODULE_COLOR}{full_module}{Colors.RESET} | "
-            # f"{Colors.MODULE_COLOR}{module}{Colors.RESET} | "
-            # f"{Colors.CLASS_COLOR}{cls_name}{Colors.RESET} | "
             f"{Colors.DEF_COLOR}{deff}{Colors.RESET} | "
             f"{message}"
         )
@@ -133,7 +126,9 @@ class JSONFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         import json
 
-        filename = os.path.basename(record.pathname) if record.pathname else None
+        filename = (
+            os.path.basename(record.pathname) if record.pathname else None
+        )
 
         log_entry = {
             "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],

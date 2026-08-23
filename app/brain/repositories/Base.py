@@ -1,13 +1,11 @@
-from typing import Any, Type, TypeVar, Generic
+from typing import Any
 
 from sqlalchemy import inspect, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-ModelType = TypeVar("ModelType")
 
-
-class BaseRepo(Generic[ModelType]):
-    def __init__(self, session: AsyncSession, model: Type[ModelType]) -> None:
+class BaseRepo[ModelType]:
+    def __init__(self, session: AsyncSession, model: type[ModelType]) -> None:
         self.session = session
         self.model = model
 
@@ -15,7 +13,9 @@ class BaseRepo(Generic[ModelType]):
         """Ultrafast method for search by Primary Key."""
         return await self.session.get(self.model, id)
 
-    async def get_by_field(self, field_name: str, value: Any) -> ModelType | None:
+    async def get_by_field(
+        self, field_name: str, value: Any
+    ) -> ModelType | None:
         """Universal search for another fields."""
 
         if not hasattr(self.model, field_name):
@@ -23,7 +23,9 @@ class BaseRepo(Generic[ModelType]):
                 f"Columns {field_name} not created in {self.model.__name__}."
             )
 
-        stmt = select(self.model).where(getattr(self.model, field_name) == value)
+        stmt = select(self.model).where(
+            getattr(self.model, field_name) == value
+        )
         result = await self.session.execute(stmt)
 
         return result.scalar_one_or_none()

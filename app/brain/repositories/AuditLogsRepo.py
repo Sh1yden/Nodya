@@ -1,7 +1,8 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .Base import BaseRepo
 from app.brain.models import AuditLogs
+
+from .Base import BaseRepo
 
 
 class AuditLogsRepo(BaseRepo[AuditLogs]):

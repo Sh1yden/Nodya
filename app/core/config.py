@@ -13,11 +13,14 @@ class SettingsSchema(BaseSettings):
         default=False, description="Skills enabled in system of run"
     )
     SANDBOX_ENABLED: bool = Field(
-        default=True, description="Sandbox mode(in docker container) for skills."
+        default=True,
+        description="Sandbox mode(in docker container) for skills.",
     )
 
     # Owner sys
-    OWNER_USERNAME: str = Field(default="Shayden", description="Admin username.")
+    OWNER_USERNAME: str = Field(
+        default="Shayden", description="Admin username."
+    )
 
     # PostgreSQL
     POSTGRES_HOST: str = Field(default="localhost")

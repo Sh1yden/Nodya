@@ -7,13 +7,14 @@ RedisClient.
 Путь в проекте: app/brain/memory/short/redis.py
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID, uuid4
 
-from app.core import get_logger
 from pydantic import BaseModel
 from redis.asyncio import Redis
+
+from app.core import get_logger
 
 logger = get_logger(__name__)
 
@@ -90,7 +91,9 @@ class RedisClient:
 
     def __init__(self, redis_url: str) -> None:
         self._redis: Redis = Redis.from_url(redis_url, decode_responses=True)
-        self._release_lock_script = self._redis.register_script(_RELEASE_LOCK_SCRIPT)
+        self._release_lock_script = self._redis.register_script(
+            _RELEASE_LOCK_SCRIPT
+        )
 
     async def close(self) -> None:
         """Закрыть пул соединений. Вызывать при graceful shutdown."""
@@ -116,7 +119,7 @@ class RedisClient:
     ) -> None:
         """Записать статус диалога с этим user_id, опционально с TTL."""
         key = _state_key(user_id)
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         async with self._redis.pipeline(transaction=True) as pipe:
             pipe.hset(key, mapping={"status": status, "last_active_at": now})
             if ttl is not None:
@@ -129,7 +132,9 @@ class RedisClient:
 
     # --- Context ---
 
-    async def push_context(self, user_id: UUID, message: ContextMessage) -> None:
+    async def push_context(
+        self, user_id: UUID, message: ContextMessage
+    ) -> None:
         """Добавить сообщение в историю, обрезать до лимита, обновить TTL."""
         key = _context_key(user_id)
         async with self._redis.pipeline(transaction=True) as pipe:
@@ -138,7 +143,9 @@ class RedisClient:
             pipe.expire(key, _CONTEXT_TTL_SECONDS)
             await pipe.execute()
 
-    async def get_context(self, user_id: UUID, limit: int = 20) -> list[ContextMessage]:
+    async def get_context(
+        self, user_id: UUID, limit: int = 20
+    ) -> list[ContextMessage]:
         """Вернуть последние `limit` сообщений в хронологическом порядке."""
         raw_items = await self._redis.lrange(_context_key(user_id), -limit, -1)
         messages: list[ContextMessage] = []
@@ -167,7 +174,9 @@ class RedisClient:
         иначе можно случайно снять чужой лок после гонки по TTL.
         """
         token = uuid4().hex
-        acquired = await self._redis.set(_lock_key(user_id), token, nx=True, ex=ttl)
+        acquired = await self._redis.set(
+            _lock_key(user_id), token, nx=True, ex=ttl
+        )
         return token if acquired else None
 
     async def release_lock(self, user_id: UUID, token: str) -> bool:

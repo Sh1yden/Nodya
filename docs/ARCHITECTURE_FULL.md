@@ -402,7 +402,7 @@ sequenceDiagram
     B->>U: Ответ
 ```
 
-**WebSocket endpoint:** `GET /ws?token=<auth_token>` — при подключении аутентификация, затем双向 обмен.
+**WebSocket endpoint:** `GET /ws?token=<auth_token>` — при подключении аутентификация, затем обмен.
 
 ---
 
