@@ -1,11 +1,14 @@
 from datetime import datetime
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Uuid, func
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .Base import Base
+
+if TYPE_CHECKING:
+    from .Users import Users
 
 
 class AuthTokens(Base):
@@ -15,7 +18,7 @@ class AuthTokens(Base):
         Integer, primary_key=True, autoincrement=True
     )
     user_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("users.user_id"), nullable=False
+        Uuid, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
     )
     client_type: Mapped[Literal["browser", "cli"]] = mapped_column(
         String, nullable=False
@@ -30,3 +33,5 @@ class AuthTokens(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+    user: Mapped["Users"] = relationship(back_populates="auth_tokens")

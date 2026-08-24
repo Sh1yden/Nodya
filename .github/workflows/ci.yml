@@ -11,6 +11,7 @@ env:
   OPENROUTER_API_KEY: dummy
   TELEGRAM_BOT_TOKEN: dummy
   TELEGRAM_WEBHOOK_URL: dummy
+  TELEGRAM_WEBHOOK_SECRET: dummy
 
 jobs:
   # Быстрый job: линтер + импорт всех пакетов. Не трогает БД,
@@ -48,7 +49,17 @@ jobs:
           import app.brain.models
           import app.brain.repositories
           import app.brain.memory.short.redis
+          import app.api.auth
+          import app.api.deps
+          import app.common.broker
+          import app.common.schemas
+          import app.api.health
+          import app.api.messaging
+          import app.api.tunnels
+          import app.api.webhook_tg
+          import app.senders.tg_sender
           import app.core
+          import app.worker
           print('All core packages import cleanly')
           "
 

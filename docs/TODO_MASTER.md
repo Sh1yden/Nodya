@@ -5,6 +5,39 @@
 
 ---
 
+## Поправки (2026-08-24) — зафиксированные архитектурные решения
+
+Развилки исходного плана закрыты, решения обязательны к реализации:
+
+| # | Решение | Содержание |
+|---|---|---|
+| 1 | Debounce в Worker | Gateway публикует каждое сообщение сразу, без Redis. Worker держит фиксированное окно 5с (`DEBOUNCE_SECONDS`) с момента первого сообщения, копит пачку в памяти процесса. Крэш → сообщения не были ACK → redelivery, at-least-once сохраняется |
+| 2 | Отложенные сообщения | Redis ZSet `nodya:scheduled` (score = unix ts отправки) + APScheduler-job каждые ~30s (`SCHEDULED_POLL_SECONDS`) переносит созревшее в `outgoing_messages`. RabbitMQ per-message TTL отклонён (head-of-line blocking) |
+| 3 | Токены доступа | Opaque-токены хэшируются **SHA-256** (высокоэнтропийный токен не требует медленного KDF). Argon2id — только для паролей. См. обновлённый ADR-3 |
+| 4 | Занятый лок | Не NACK+requeue (горячий цикл). ACK исходных сообщений + запись пачки в `nodya:scheduled` (+30s) с `retry_count`; после 5 попыток (`MAX_SCHEDULED_RETRIES`) → DLQ + лог ERROR |
+| 5 | Webhook Telegram | Обязательная проверка заголовка `X-Telegram-Bot-Api-Secret-Token` (`secrets.compare_digest`); секрет в `set_webhook` и в Settings |
+| 6 | Новая таблица `messages` | Сырой архив входящих/исходящих; consolidation НЕ чистит. Защита от потери истории |
+| 7 | Новая таблица `feed_sources` | Источники RSS/TG фонового парсера (Этап 7) |
+| 8 | OWNER | `OWNER_USERNAME` (в модели `Users` нет поля email — вариант с OWNER_EMAIL невозможен без миграции) |
+| 9 | Туннели для dev | Без `TELEGRAM_WEBHOOK_URL` локально поднимается cloudflared quick-tunnel. Tuna отклонена (RU-сегмент, обход не тянет). Внутри Docker бинарника нет — там обязателен явный URL. Stdout туннеля дренируется фоновым потоком (иначе пайп переполняется и туннель замирает) |
+
+Порядок реализации: E(docs) → B(инфра) → C(вертикальный срез TG→эхо) → D1..D5 (бывшие Этапы 3–9).
+
+## Журнал выполнения
+
+| Дата | Инкремент | Результат |
+|---|---|---|
+| 2026-08-24 | E | Решения запечатаны в docs |
+| 2026-08-24 | B | Redis noeviction+AOF, healthcheck Qdrant, внешняя сеть, .env.example |
+| 2026-08-24 | C | Вертикальный срез работает E2E (проверено на живом TG): webhook+секрет → RabbitMQ → Worker(debounce 5с, лок, scheduled-poller, авторегистрация TG) → эхо → TGSender; туннели cloudflared/tuna; fail-fast + /health. Попутно исправлен vhost-баг в rabbitmq_url |
+| 2026-08-24 | D1 | Модель Messages (+миграция eda380bd303f), sha256-токены (ADR-3), /auth/register + /auth/login с ролями owner (проверено curl: 201/409/401/200), deps.get_current_user, архивация пачек в messages из Worker (degraded при сбое). Найдено и исправлено: дрейф схемы старой БД (пересоздан volume postgres), отсутствие relationship Users↔AuthTokens ломало порядок INSERT |
+| 2026-08-24 | H | Tuna удалена (RU-сегмент); drain stdout cloudflared (фикс зависания туннеля); drop_pending_updates=False на set_webhook (офлайн-сообщения доставляются); подробные логи webhook/worker/sender; FK ON DELETE CASCADE (миграция abbdbc96f127) + DELETE /auth/me (204/401 проверено curl) |
+| 2026-08-24 | N | Интеграция с named-tunnel инфраструктурой: ingress nodya.shayden.ru → nodya_heart:8014 в BridgeNode/config.yml; internet_bridge возвращён в compose (конвенция инфраструктуры — ошибка части B признана); Dockerfile --no-install-project (hatch-vcs без .git); полный стек в контейнерах, health 200 через https://nodya.shayden.ru. Quick-tunnel оставлен как zero-config fallback |
+
+Следующий шаг: D2 — Context Assembly (Redis context в Worker, заглушка proactive_decision, APScheduler-перенос nodya:scheduled).
+
+---
+
 ## **Этап 0: - [x] Фикс того, что уже написано**
 
 Блокирующие баги в существующем коде. Без этого ни миграции, ни регистрация, ни запуск не работают.
@@ -258,7 +291,7 @@ class RedisClient:
 ### 3.2 `app/api/deps.py`
 - `async def get_current_user(token: str = Header(..., alias="Authorization")) -> Users`:
   - Извлекает Bearer-токен
-  - Хэширует argon2id
+  - Хэширует SHA-256 (не argon2id — поправка 3, ADR-3)
   - Ищет в `AuthTokens` по хэшу
   - Проверяет `revoked_at is NULL`
   - Возвращает `Users`
@@ -279,17 +312,20 @@ class RedisClient:
   - Создание `Users`:
     - Если это первый пользователь ИЛИ email совпадает с `OWNER_EMAIL` -> `role="owner"`
     - Иначе `role="user"`
-  - Создание `AuthTokens` с токеном
-  - Ответ: `{user_id, token}` (plaintext)
+   - Создание `AuthTokens`: `token_hash` = sha256(token)
+   - Ответ: `{user_id, token}` (plaintext)
 - **POST /auth/login:**
   - `LoginRequest`: `{username: str, password: str}`
   - `verify_password(password, stored_hash)`
-  - Генерация нового opaque-токена -> `AuthTokens`
+  - Генерация нового opaque-токена -> `AuthTokens` (`token_hash` = sha256(token))
   - Ответ: `{token}` (plaintext)
 
 ### 3.5 `app/api/chats/tg/` — Telegram (только incoming)
 - **Webhook:**
   - `POST /webhook/telegram` — стандартный endpoint от Telegram Bot API
+  - Обязательная проверка заголовка
+    `X-Telegram-Bot-Api-Secret-Token` против `TELEGRAM_WEBHOOK_SECRET`
+    через `secrets.compare_digest`; не совпал -> 403 (поправка 5)
   - Pydantic-модель `TelegramUpdate` (update_id, message, etc.)
   - Валидация через `aiogram.types.Update` или свою модель
   - Извлечение `telegram_id` и текста
@@ -344,7 +380,7 @@ class WebSocketManager:
         """Закрыть все соединения (graceful shutdown)."""
 ```
 
-### 3.7 `app/api/messaging.py` — `MessagePublisher`
+### 3.8 `app/api/messaging.py` — `MessagePublisher`
 ```python
 class MessagePublisher:
     def __init__(self, rabbitmq_url: str):
@@ -438,8 +474,12 @@ class Worker:
     async def handle_message(self, message: IncomingMessage) -> None:
         """
         1. resolve_user(message.channel, message.user_external_id)
-        2. acquire_lock(user.user_id)
-        3. pop_debounce_batch(user.user_id) — забрать все накопленные сообщения
+        2. Debounce: фиксированное окно DEBOUNCE_SECONDS с момента
+           первого сообщения; пачка копится в памяти Worker'а
+           (поправки 1). Сообщения не ACK до обработки пачки.
+        3. acquire_lock(user.user_id); если лок занят — ACK исходных
+           + запись пачки в nodya:scheduled (+30s) с retry_count;
+           retry_count >= MAX_SCHEDULED_RETRIES -> DLQ (поправка 4)
         4. set_state(user.user_id, "thinking")
         5. build_context(user.user_id, debounce_texts)
         6. assemble_system_prompt(user, context)
@@ -449,7 +489,7 @@ class Worker:
         10. push_context(user.user_id, ...)
         11. publish outgoing (с delay_until если отложенный)
         12. release_lock(user.user_id)
-        13. ACK original message
+        13. ACK всех сообщений пачки
         """
     
     async def proactive_decision(self, user: Users) -> ProactiveDecision:
@@ -475,6 +515,16 @@ class Worker:
     def assemble_system_prompt(self, user: Users, context: PromptContext) -> str:
         """ME.md + RULES.md + (CREATOR.md если owner) + сериализованные факты + векторные хиты."""
 ```
+
+### 4.3 Модель `Messages` — сырой архив диалога (поправка 6)
+- Таблица `messages`: `message_id` PK, `user_id` FK -> users,
+  `direction` Literal["incoming", "outgoing"], `channel` String,
+  `external_id` BigInteger nullable (id сообщения канала),
+  `text` Text NOT NULL, `created_at` DateTime(tz)
+- Индекс `(user_id, created_at)`
+- Worker пишет запись при получении и при отправке
+- **Consolidation НЕ удаляет архив** — только Redis-контекст
+- Миграция Alembic после создания модели
 
 ---
 
@@ -588,6 +638,13 @@ class SandboxExecutor:
         """
 ```
 
+### 5.7 Инициализация коллекции Qdrant
+- При bootstrap Worker'а: создать коллекцию `nodya_memory`,
+  если отсутствует
+- Параметры: размер вектора по embedding-модели (text-embedding-004
+  = 768), distance = Cosine
+- Payload-индекс: `user_id` (keyword) — фильтрация фактов по юзеру
+
 ---
 
 ## **Этап 6: Channel Senders — доставка ответов пользователю**
@@ -626,36 +683,18 @@ class ChannelSender(ABC):
 - `WebSocketManager.send_to_user(message.user_id, message.text)`
 - Если сокет закрыт — логировать как недоставленное, не падать
 
-### 6.4 Proactive decision flow (в Worker'е)
-```python
-async def proactive_decision(user: Users) -> ProactiveDecision:
-    """
-    Принимает решение о том, как реагировать на сообщение.
-
-    Логика (из tldraw):
-    1. Проверить state пользователя (из Redis)
-    2. Если state == "thinking" -> delay (повторная попытка через 30с)
-    3. Если state == "idle" -> рандом:
-       - 70% ответить сейчас
-       - 20% отложить (рандом 5мин-2ч)
-       - 10% пропустить (сообщение сохранено в контекст, но ответ не генерируется)
-
-    Возвращает ProactiveDecision {action, delay_seconds}
-    """
-
-
-class ProactiveDecision(BaseModel):
-    action: Literal["now", "delay", "skip"]
-    delay_seconds: int | None = None
-    reason: str | None = None  # для логирования
-```
-
-### 6.5 Отложенные сообщения (delayed)
+### 6.4 Отложенные сообщения (delayed) — РЕШЕНО (поправка 2)
 - `OutgoingMessage` содержит поле `delay_until: datetime | None`
-- Если `delay_until` в будущем — consumer не отправляет, а перепубликует сообщение с `expiration` в RabbitMQ
-- Или: хранить scheduled messages в Redis Sorted Set (`nodya:scheduled:{user_id}`, score = timestamp) и APScheduler проверяет каждую минуту
+- Механизм — **Redis ZSet + APScheduler**:
+  - Сообщение с будущим временем не публикуется в
+    `outgoing_messages`; Worker кладёт его в ZSet `nodya:scheduled`
+    (score = unix ts отправки, member = JSON сообщения)
+  - APScheduler-job каждые `SCHEDULED_POLL_SECONDS` (~30с) переносит
+    созревшие member'ы в `outgoing_messages`
+- RabbitMQ per-message TTL **отклонён**: очередь проверяет TTL только
+  у головы — одно долгое сообщение блокирует все последующие
 
-### 6.6 Проактивная отправка в любой канал
+### 6.5 Проактивная отправка в любой канал
 - Worker публикует `OutgoingMessage` с `channel="telegram"` или `channel="browser"` и т.д.
 - Channel Sender соответствующего канала забирает и отправляет
 - Единый механизм для всех каналов — никакой логики отправки внутри Worker'a
@@ -663,6 +702,14 @@ class ProactiveDecision(BaseModel):
 ---
 
 ## **Этап 7: Фоновые задачи (проактивное поведение)**
+
+### 7.0 Модель `FeedSources` — источники парсера (поправка 7)
+- Таблица `feed_sources`: `source_id` PK, `url` String unique,
+  `kind` Literal["rss", "telegram"], `title` String nullable,
+  `is_active` Boolean default True,
+  `last_checked_at` DateTime(tz) nullable, `created_at`
+- Управление источниками позже — через skills tier `system`
+- Миграция Alembic после создания модели
 
 ### 7.1 `app/brain/skills/background.py` — `BackgroundParserJob`
 ```python

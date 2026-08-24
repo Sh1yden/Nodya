@@ -422,14 +422,23 @@ sequenceDiagram
 
 | Компонент | Методы | Назначение |
 |---|---|---|
-| `chats/tg/` | `POST /webhook` | Приём webhook от Telegram. Валидация через Pydantic (модель Telegram Update). Публикация `IncomingMessage`. Ответ `202 Accepted` |
+| `chats/tg/` | `POST /webhook` | Приём webhook от Telegram. Обязательная проверка `X-Telegram-Bot-Api-Secret-Token` (`secrets.compare_digest`, не совпал — 403). Валидация через Pydantic (модель Telegram Update). Публикация `IncomingMessage`. Ответ `202 Accepted` |
 | `chats/browser/` | `POST /api/chats/browser/send` | Отправка сообщения от browser-клиента (требует токен). Публикация `IncomingMessage` |
 | `chats/browser/` | `GET /ws?token=<token>` | WebSocket для browser: отправка сообщений + получение ответов |
 | `ws.py` | `WebSocketManager` | Менеджер WebSocket-соединений: connect/disconnect/отправка |
 | `auth/` | `POST /auth/register` | Регистрация (username, email, password) -> Users + AuthTokens |
 | `auth/` | `POST /auth/login` | Логин (username, password) -> AuthTokens |
 | `health.py` | `GET /health` | Проверка всех внешних сервисов (PG, Redis, RabbitMQ, Qdrant) |
-| `deps.py` | `get_current_user` | Dependency: хэш токена из `Authorization: Bearer` -> поиск в `AuthTokens` -> возврат `Users` |
+| `deps.py` | `get_current_user` | Dependency: sha256 токена из `Authorization: Bearer` -> поиск в `AuthTokens` -> возврат `Users` |
+
+**Туннели для локальной разработки (`app/api/tunnels.py`):**
+Если `TELEGRAM_WEBHOOK_URL` пуст — при старте поднимается cloudflared
+quick-tunnel и полученный URL используется в `set_webhook`. Tuna
+отклонена (RU-сегмент). При остановке с эфемерным URL вебхук
+удаляется; фиксированный URL не трогается. Stdout туннеля дренируется
+фоновым потоком — без этого буфер пайпа переполняется и туннель замирает.
+Ограничение: бинарник есть только на хосте — внутри Docker обязателен
+явный `TELEGRAM_WEBHOOK_URL`.
 
 ### 5.3 Channel Senders — доставка ответов пользователю
 
@@ -443,6 +452,8 @@ sequenceDiagram
 | `CLI Sender` | `outgoing_messages` | `channel == "cli"` | Отправка через CLI (после MVP) |
 
 Каждый Sender — отдельный asyncio Task, который может быть запущен в том же контейнере, что Worker, или вынесен отдельно.
+
+**Исключение — Browser Sender:** он обязан выполняться внутри процесса API Gateway, так как `WebSocketManager` владеет открытыми сокетами клиентов; из отдельного процесса их не достать.
 
 ### 5.4 Worker (`app/worker.py`)
 
@@ -625,6 +636,32 @@ class SkillRegistry:
 | `status` | `String` | NOT NULL | "success", "error", "denied" |
 | `created_at` | `DateTime(tz)` | server_default=now() | Когда |
 
+### Messages (архив, ADR-14)
+
+| Колонка | Тип | Ограничения | Назначение |
+|---|---|---|---|
+| `message_id` | `Integer` | PK, autoincrement | ID записи |
+| `user_id` | `UUID` | FK -> users.user_id, NOT NULL | Владелец переписки |
+| `direction` | `String` | Literal["incoming", "outgoing"], NOT NULL | Направление |
+| `channel` | `String` | NOT NULL | telegram / browser / discord / cli |
+| `external_id` | `BigInteger` | nullable | ID сообщения в канале |
+| `text` | `Text` | NOT NULL | Текст сообщения |
+| `created_at` | `DateTime(tz)` | server_default=now() | Когда |
+
+Индекс: `(user_id, created_at)`. Consolidation архив не удаляет.
+
+### FeedSources (источники парсера, Этап 7)
+
+| Колонка | Тип | Ограничения | Назначение |
+|---|---|---|---|
+| `source_id` | `Integer` | PK, autoincrement | ID источника |
+| `url` | `String` | NOT NULL, unique | RSS/TG URL |
+| `kind` | `String` | Literal["rss", "telegram"] | Тип источника |
+| `title` | `String` | nullable | Человекочитаемое имя |
+| `is_active` | `Boolean` | default=True | Выключение без удаления |
+| `last_checked_at` | `DateTime(tz)` | nullable | Последний обход |
+| `created_at` | `DateTime(tz)` | server_default=now() | Когда добавлен |
+
 ---
 
 ## 7. Принятые архитектурные решения (ADR)
@@ -640,10 +677,10 @@ class SkillRegistry:
 - **Решение:** Multi-tenant в рамках одного инстанса с ролями owner/user
 - **Обоснование:** Соответствует модели "развернул для себя/команды". Owner может дать доступ другим пользователям того же деплоя
 
-### ADR-3: Opaque-токены вместо JWT
-- **Контекст:** Аутентификация для browser/cli
-- **Решение:** Argon2id-хэш токена хранится в БД, plaintext отдаётся один раз
-- **Обоснование:** Монолит с одним инстансом — stateless-верификация не нужна. Хэш в БД даёт мгновенный отзыв токена без blacklist'ов
+### ADR-3: Opaque-токены вместо JWT, хэш SHA-256 (не argon2id)
+- **Контекст:** Аутентификация для browser/cli. Изначально планировался Argon2id для хэширования токенов
+- **Решение:** Opaque-токен; в БД хранится `sha256(token)`, plaintext отдаётся один раз. Пароли — по-прежнему Argon2id
+- **Обоснование:** Argon2id намеренно медленный (~50–100 мс) — это нужно против перебора *слабых паролей*, но избыточно для токена: токен — высокоэнтропийная случайная строка (128+ бит), перебор бессмыслен даже на быстром хэше. SHA-256 (<1 мкс) снимает ~100 мс задержки с каждого авторизованного запроса. Монолит с одним инстансом — stateless-верификация не нужна, мгновенный отзыв через `revoked_at` сохраняется
 
 ### ADR-4: RabbitMQ как единственный транспорт
 - **Контекст:** Communication между API Gateway, Worker и Agent
@@ -686,6 +723,30 @@ class SkillRegistry:
 - **Обоснование:** Repository — чистая абстракция данных, логи в нём создают шум и дублирование. Service слой владеет контекстом операции и может записать осмысленное сообщение об ошибке
 - **Статус:** Принято
 
+### ADR-12: Debounce в Worker'е, а не в API Gateway
+- **Контекст:** Кто держит окно 5 секунд тишины и буфер сообщений. Изначально предполагался вариант с записью Gateway в Redis
+- **Решение:** Gateway публикует каждое сообщение в RabbitMQ сразу. Worker держит фиксированное окно `DEBOUNCE_SECONDS` (от первого сообщения пачки) и копит батч в памяти процесса
+- **Обоснование:** Сохраняет принцип «Gateway не зависит от Redis». Фиксированное окно (вместо сброса таймера по тишине) даёт верхнюю границу задержки и защищает от голодания при непрерывном наборе текста. Крэш процесса: сообщения не были ACK — RabbitMQ переделiverит, at-least-once сохраняется
+- **Статус:** Принято (уточнение к §4.5)
+
+### ADR-13: Отложенные сообщения — Redis ZSet + APScheduler
+- **Контекст:** Механизм `delay_until` и повторных попыток. Кандидаты: RabbitMQ per-message TTL+DLX, плагин delayed-message, Redis ZSet
+- **Решение:** ZSet `nodya:scheduled` (score = unix ts отправки) + APScheduler-job опроса каждые ~30s; созревшие элементы публикуются в `outgoing_messages`
+- **Обоснование:** Per-message TTL в RabbitMQ проверяется только у головы очереди (head-of-line blocking) — одно долгое сообщение блокирует все последующие. Плагин добавляет сторонний компонент в инфраструктуру. Redis и APScheduler уже в стеке. Компонент `nodya:scheduled` используется и для повторов при занятом локе (ADR-15), и для проактивных отложенных ответов
+- **Статус:** Принято
+
+### ADR-14: Сырой архив сообщений в PostgreSQL
+- **Контекст:** История диалога живёт только 24 ч в Redis и стирается после consolidation. Падение consolidation = невоспратимая потеря
+- **Решение:** Таблица `messages` (direction incoming/outgoing, channel, text). Worker пишет записи при получении и отправке. Consolidation НЕ чистит архив
+- **Обоснование:** Полная история — основа консолидации (LLM получает сырые сообщения, а не только Redis-контекст), восстановления после сбоев и отладки. Объём для self-hosted инстанса незначителен
+- **Статус:** Принято
+
+### ADR-15: Занятый лок — перенос в scheduled, не NACK+requeue
+- **Контекст:** Worker получил сообщение, лок пользователя занят другим батчем
+- **Решение:** ACK исходных сообщений + запись пачки в `nodya:scheduled` (+30s) с `retry_count`; после `MAX_SCHEDULED_RETRIES` (5) — DLQ + ERROR
+- **Обоснование:** NACK с requeue создаёт горячий цикл (сообщение мгновенно возвращается тому же занятому воркеру). Единый механизм с ADR-13. Потеря после 5 неудач фиксируется в DLQ для ручного разбора
+- **Статус:** Принято
+
 ---
 
 ## 8. Конфигурация (Settings)
@@ -724,15 +785,26 @@ class SettingsSchema(BaseSettings):
 
     # --- Telegram ---
     TELEGRAM_BOT_TOKEN: str = ""
-    TELEGRAM_WEBHOOK_URL: str = ""
+    TELEGRAM_WEBHOOK_URL: str = ""  # пусто -> туннель (только локальный запуск)
+    TELEGRAM_WEBHOOK_SECRET: str  # обязателен; проверка заголовка вебхука
+
+    # --- Туннель (dev) ---
+    TUNNEL_TIMEOUT: int = 30
+
+    # --- Worker ---
+    DEBOUNCE_SECONDS: int = 5
+    SCHEDULED_POLL_SECONDS: int = 30
+    MAX_SCHEDULED_RETRIES: int = 5
 
     # --- Skills ---
     SYSTEM_SKILLS_ENABLED: bool = False
     SANDBOX_ENABLED: bool = True
 
     # --- Owner ---
-    OWNER_EMAIL: str = (
-        ""  # Первый зарегистрировавшийся с этим email получает role=owner
+    OWNER_USERNAME: str = (
+        ""  # Первый пользователь с таким username получает role=owner.
+        # В модели Users нет поля email — вариант OWNER_EMAIL требует
+        # миграции и отклонён
     )
 
     @computed_field
@@ -759,6 +831,8 @@ class SettingsSchema(BaseSettings):
 | Redis недоступен | Lock не взять -> сообщение остаётся в очереди. Worker падает с ошибкой |
 | RabbitMQ недоступен | API Gateway не может опубликовать -> 503 Service Unavailable |
 | Qdrant недоступен | Worker продолжает без векторного поиска (degraded mode), лог ошибки |
+| Лок пользователя занят | ACK исходных + пачка в `nodya:scheduled` (+30s, `retry_count`); после 5 попыток -> DLQ (ADR-15) |
+| Отложенное сообщение | ZSet `nodya:scheduled`, APScheduler-job переносит созревшие в `outgoing_messages` каждые ~30s (ADR-13) |
 | Graceful shutdown | SIGTERM -> stop consuming -> таймаут 30с на текущие задачи -> закрытие пулов |
 | Некорректный токен | 401 Unauthorized с общей формулировкой (не уточнять, что именно не так) |
 

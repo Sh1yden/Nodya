@@ -4,8 +4,11 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 
+# Проект не устанавливаем как дистрибуцию (--no-install-project):
+# без .git в образе hatch-vcs не может вычислить версию, а код и так
+# копируется файлами и импортируется из WORKDIR
 COPY pyproject.toml uv.lock ./
-RUN uv sync --no-dev --frozen
+RUN uv sync --no-dev --frozen --no-install-project
 
 FROM python:3.13-slim AS runtime
 

@@ -2,9 +2,15 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import BigInteger, String, Uuid, func
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    String,
+    Uuid,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .Base import Base
 
@@ -32,4 +38,12 @@ class Users(Base):
         String, nullable=False
     )
     settings: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-    created_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    auth_tokens: Mapped[list["AuthTokens"]] = relationship(  # noqa: F821
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )

@@ -16,7 +16,9 @@ class AuditLogs(Base):
         Integer, primary_key=True, autoincrement=True
     )
     user_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("users.user_id"), nullable=False
+        Uuid,
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
     )
     tool_name: Mapped[str] = mapped_column(String, nullable=False)
     arguments: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)

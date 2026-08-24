@@ -24,6 +24,7 @@ _CONTEXT_PREFIX = "nodya:context"
 _LOCK_PREFIX = "nodya:lock"
 _DEBOUNCE_PREFIX = "nodya:debounce"
 _AGENT_ONLINE_PREFIX = "nodya:agent_online"
+_SCHEDULED_KEY = "nodya:scheduled"
 
 _CONTEXT_MAX_LEN = 100
 _CONTEXT_TTL_SECONDS = 24 * 60 * 60
@@ -35,6 +36,15 @@ if redis.call("GET", KEYS[1]) == ARGV[1] then
 else
     return 0
 end
+"""
+
+_POP_DUE_SCRIPT = """
+local items = redis.call("ZRANGEBYSCORE", KEYS[1],
+    "-inf", ARGV[1], "LIMIT", 0, tonumber(ARGV[2]))
+if #items > 0 then
+    redis.call("ZREM", KEYS[1], unpack(items))
+end
+return items
 """
 
 
@@ -94,10 +104,42 @@ class RedisClient:
         self._release_lock_script = self._redis.register_script(
             _RELEASE_LOCK_SCRIPT
         )
+        self._pop_due_script = self._redis.register_script(_POP_DUE_SCRIPT)
 
     async def close(self) -> None:
         """Закрыть пул соединений. Вызывать при graceful shutdown."""
         await self._redis.aclose()
+
+    async def ping(self) -> bool:
+        """Проверить доступность Redis (health/fail-fast)."""
+        try:
+            return bool(await self._redis.ping())
+        except Exception:
+            logger.exception("Redis недоступен.")
+            return False
+
+    # --- Scheduled (ADR-13/15) ---
+
+    async def push_scheduled(self, member: str, score_ts: float) -> None:
+        """Положить элемент в ZSet отложенных задач.
+
+        member — сериализованная задача (ScheduledEnvelope),
+        score — unix-время, когда задачу пора выполнить.
+        """
+        await self._redis.zadd(_SCHEDULED_KEY, {member: score_ts})
+
+    async def pop_due_scheduled(
+        self, now_ts: float, limit: int = 50
+    ) -> list[str]:
+        """Атомарно забрать созревшие элементы ZSet (score <= now_ts).
+
+        Изъятие и возврат — один Lua-скрипт: без него между чтением
+        и удалением другой воркер мог бы забрать те же элементы.
+        """
+        raw_items = await self._pop_due_script(
+            keys=[_SCHEDULED_KEY], args=[now_ts, limit]
+        )
+        return [str(item) for item in raw_items]
 
     # --- State ---
 

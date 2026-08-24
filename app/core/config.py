@@ -1,3 +1,5 @@
+from urllib.parse import quote
+
 from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -7,6 +9,9 @@ class SettingsSchema(BaseSettings):
 
     # Логирование
     LOG_LEVEL: str = Field(default="DEBUG")
+
+    # HTTP
+    APP_PORT: int = Field(default=8014)
 
     # Sys skills
     SYSTEM_SKILLS_ENABLED: bool = Field(
@@ -39,27 +44,47 @@ class SettingsSchema(BaseSettings):
     RABBITMQ_PORT: int = Field(default=5672)
     RABBITMQ_USER: str = Field(default="guest")
     RABBITMQ_PASSWORD: str = Field(default="guest")
+    RABBITMQ_VHOST: str = Field(default="/")
 
     # Qdrant
     QDRANT_HOST: str = Field(default="localhost")
     QDRANT_PORT: int = Field(default=6333)
 
-    # AI API'S
-    GEMINI_API_KEY: str
-    OPENROUTER_API_KEY: str
+    # AI API'S (строгая проверка появится в Этапе 5 при инициализации
+    # провайдеров; до этого пустые значения допустимы)
+    GEMINI_API_KEY: str = Field(default="")
+    OPENROUTER_API_KEY: str = Field(default="")
 
     # Chats tokens
     # Telegram
-    TELEGRAM_BOT_TOKEN: str
-    TELEGRAM_WEBHOOK_URL: str
+    TELEGRAM_BOT_TOKEN: str = Field(default="")
+    TELEGRAM_WEBHOOK_URL: str = Field(
+        default="",
+        description=(
+            "Публичный базовый URL вебхука. "
+            "Пусто -> туннель cloudflared (только локальный запуск)."
+        ),
+    )
+    TELEGRAM_WEBHOOK_SECRET: str = Field(
+        description="Секрет заголовка X-Telegram-Bot-Api-Secret-Token."
+    )
+
+    # Туннель (локальная разработка)
+    TUNNEL_TIMEOUT: int = Field(default=30)
+
+    # Worker (поправки 1/2/4)
+    DEBOUNCE_SECONDS: int = Field(default=5)
+    SCHEDULED_POLL_SECONDS: int = Field(default=30)
+    MAX_SCHEDULED_RETRIES: int = Field(default=5)
 
     @computed_field
     @property
     def rabbitmq_url(self) -> str:
+        vhost = quote(self.RABBITMQ_VHOST, safe="")
         return (
             f"amqp://"
-            f"{self.RABBITMQ_USER}:{self.RABBITMQ_PASSWORD}@"
-            f"{self.RABBITMQ_HOST}:{self.RABBITMQ_PORT}/virtual_host"
+            f"{quote(self.RABBITMQ_USER)}:{quote(self.RABBITMQ_PASSWORD)}@"
+            f"{self.RABBITMQ_HOST}:{self.RABBITMQ_PORT}/{vhost}"
         )
 
     @computed_field

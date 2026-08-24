@@ -16,7 +16,9 @@ class HardFacts(Base):
         Integer, primary_key=True, autoincrement=True
     )
     user_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("users.user_id"), nullable=False
+        Uuid,
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
     )
     category: Mapped[str] = mapped_column(String, nullable=False)
     key: Mapped[str] = mapped_column(String, nullable=False)

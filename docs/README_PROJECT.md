@@ -46,9 +46,17 @@ cp .env.example .env
 ```
 
 Отредактируйте `.env`, указав свои ключи:
-- `GEMINI_API_KEY` — ключ Google AI Studio
 - `TELEGRAM_BOT_TOKEN` — токен Telegram-бота
-- `OWNER_EMAIL` — email владельца (первый зарегистрировавшийся получит роль owner)
+- `TELEGRAM_WEBHOOK_SECRET` — секрет вебхука (любая длинная строка)
+- `GEMINI_API_KEY` — ключ Google AI Studio
+- `OWNER_USERNAME` — username владельца
+
+Про `TELEGRAM_WEBHOOK_URL`:
+- **Пусто** (локальная разработка) — приложение само поднимет
+  cloudflared quick-tunnel и повесит вебхук на него.
+  Требует установленного бинарника `cloudflared` на хосте.
+- **Задан** — используется как есть. Единственный вариант внутри Docker
+  (бинарников туннелей в контейнере нет).
 
 ### 3. Запуск (разработка)
 
@@ -80,8 +88,10 @@ docker-compose up -d
 ```
 ├── app/                    # Nodya Core — основной сервер
 │   ├── core/               # Конфиг, логгер
-│   ├── api/                # API Gateway (webhook, auth, health)
+│   ├── api/                # API Gateway (webhook, auth, health, tunnels)
 │   ├── brain/              # "Мозг": модели, репозитории, память, LLM, скиллы
+│   ├── common/             # Общие DTO и топология брокера
+│   ├── senders/            # Доставка ответов в каналы (tg_sender, ...)
 │   └── worker.py           # Главный обработчик сообщений
 ├── agent/                  # Nodya Agent (опционально) — host-level скиллы
 ├── shared/                 # Общие схемы для RPC Core ↔ Agent

@@ -20,7 +20,7 @@ services:
       rabbitmq:
         condition: service_healthy
       qdrant:
-        condition: service_healthy
+        condition: service_started
     ports:
       - "8014:8014"
     env_file:
@@ -56,7 +56,9 @@ services:
     container_name: nodya_short_memory
     image: redis:8-alpine
     restart: unless-stopped
-    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    command: >-
+      redis-server --maxmemory 256mb --maxmemory-policy noeviction
+      --appendonly yes
     env_file:
       - .env
     ports:
@@ -96,11 +98,6 @@ services:
       - "${QDRANT_PORT:-6333}:6333"
     volumes:
       - qdrant_data:/qdrant/storage
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
 volumes:
   postgres_data:
