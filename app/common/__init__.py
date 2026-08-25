@@ -1,4 +1,4 @@
-"""Общие DTO и топология брокера для всех процессов Nodya."""
+"""Common DTOs and broker topology shared by all Nodya processes."""
 
 from .broker import (
     DLX_EXCHANGE,

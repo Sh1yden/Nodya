@@ -1,7 +1,7 @@
-"""API Gateway: auth, health, messaging-издатель, зависимости.
+"""API Gateway: auth, health, messaging publisher, dependencies.
 
-Роутеры каналов лежат в app/chats/* и подключаются в main напрямую —
-здесь их не импортируем (защита от циклических импортов).
+Channel routers live in app/chats/* and are wired in main directly —
+they are intentionally not imported here (import-cycle protection).
 """
 
 from .auth import router as auth_router

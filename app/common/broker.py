@@ -1,7 +1,7 @@
-"""Топология RabbitMQ: имена, декларации, DLQ.
+"""RabbitMQ topology: names, declarations, DLQ.
 
-Все процессы объявляют одну и ту же топологию (декларации идемпотентны),
-поэтому порядок старта Gateway/Worker/Sender не важен.
+Every process declares the same topology (declarations are
+idempotent), so Gateway/Worker/Sender startup order does not matter.
 """
 
 from typing import Final
@@ -31,9 +31,13 @@ _DEAD_LETTER_ARGUMENTS: Final[dict[str, str]] = {
 async def declare_topology(
     channel: AbstractRobustChannel,
 ) -> AbstractRobustExchange:
-    """Задекларировать exchange'и, очереди и биндинги.
+    """Declare exchanges, queues and bindings idempotently.
 
-    Возвращает основной exchange для публикации.
+    Args:
+        channel: Robust aio-pika channel to declare on.
+
+    Returns:
+        The main topic exchange used for publishing.
     """
     exchange = await channel.declare_exchange(
         EXCHANGE, ExchangeType.TOPIC, durable=True
@@ -52,7 +56,7 @@ async def declare_incoming_queue(
     channel: AbstractRobustChannel,
     exchange: AbstractRobustExchange,
 ) -> AbstractRobustQueue:
-    """Очередь входящих с маршрутизацией отказов в DLQ."""
+    """Declare the incoming queue routed to DLQ on rejection."""
     queue = await channel.declare_queue(
         QUEUE_INCOMING,
         durable=True,
@@ -66,7 +70,7 @@ async def declare_outgoing_queue(
     channel: AbstractRobustChannel,
     exchange: AbstractRobustExchange,
 ) -> AbstractRobustQueue:
-    """Очередь исходящих с маршрутизацией отказов в DLQ."""
+    """Declare the outgoing queue routed to DLQ on rejection."""
     queue = await channel.declare_queue(
         QUEUE_OUTGOING,
         durable=True,

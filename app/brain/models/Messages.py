@@ -1,3 +1,8 @@
+"""Messages model: raw dialogue archive (ADR-14).
+
+Consolidation never deletes this archive.
+"""
+
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
@@ -19,7 +24,7 @@ from .Base import Base
 
 
 class Messages(Base):
-    """Сырой архив переписки (ADR-14). Consolidation НЕ удаляет."""
+    """A single stored message, incoming or outgoing."""
 
     __tablename__ = "messages"
     __table_args__ = (

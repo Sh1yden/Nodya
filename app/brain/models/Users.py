@@ -1,14 +1,10 @@
+"""Users model: accounts across all channels."""
+
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import (
-    BigInteger,
-    DateTime,
-    String,
-    Uuid,
-    func,
-)
+from sqlalchemy import BigInteger, DateTime, String, Uuid, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -16,6 +12,8 @@ from .Base import Base
 
 
 class Users(Base):
+    """A Nodya user reachable via telegram/discord/browser/cli."""
+
     __tablename__ = "users"
 
     user_id: Mapped[UUID] = mapped_column(

@@ -81,7 +81,7 @@ services:
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
     ports:
       - "${RABBITMQ_PORT:-5672}:5672"
-      - "15672:15672" # Management UI (non-essential)
+      - "15672:15672" # Management UI (optional)
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:

@@ -1,8 +1,9 @@
-"""Доставка исходящих сообщений в Telegram.
+"""Delivery of outgoing messages to Telegram.
 
-Consumer очереди outgoing_messages с фильтром channel == "telegram".
-Отправка через aiogram Bot; ретраи только на сетевые/рейт-ошибки,
-после 3 неудач — nack в DLQ (Этап 6.2 TODO_MASTER).
+Consumer of the outgoing_messages queue filtered by
+channel == "telegram". Sends via aiogram Bot; retries only network /
+rate-limit errors, after 3 failures — nack into DLQ (TODO_MASTER
+6.2).
 """
 
 import asyncio
@@ -35,7 +36,7 @@ _MAX_SEND_ATTEMPTS = 3
 
 
 class TGSender(LoggerMixin):
-    """Channel Sender для telegram (Этап 6.2)."""
+    """Channel sender for the telegram channel (TODO_MASTER 6.2)."""
 
     def __init__(
         self,
@@ -43,6 +44,13 @@ class TGSender(LoggerMixin):
         bot_token: str,
         session_factory: type = AsyncSessionLocal,
     ) -> None:
+        """Store connection parameters (no I/O here).
+
+        Args:
+            broker_url: AMQP DSN for the outgoing consumer.
+            bot_token: Telegram bot token for sending.
+            session_factory: Async session factory for id lookups.
+        """
         self._url = broker_url
         self._bot_token = bot_token
         self._session_factory = session_factory
@@ -53,9 +61,10 @@ class TGSender(LoggerMixin):
         self._running = False
 
     async def run(self) -> None:
-        """Подключиться к брокеру и начать consume outgoing."""
+        """Connect to the broker and start consuming outgoing."""
         if not self._bot_token:
-            raise RuntimeError("TELEGRAM_BOT_TOKEN пуст.")
+            raise RuntimeError("TELEGRAM_BOT_TOKEN is empty.")
+        self._lg.debug("TGSender starting...")
         self._bot = Bot(token=self._bot_token)
         self._connection = await aio_pika.connect_robust(self._url)
         self._channel = await self._connection.channel()
@@ -66,30 +75,36 @@ class TGSender(LoggerMixin):
         await self._queue.consume(self._on_message)
 
     async def stop(self) -> None:
-        """Graceful shutdown: consumer, сессия бота, брокер."""
+        """Graceful shutdown: consumer, bot session, broker."""
         self._running = False
         if self._connection is not None and not self._connection.is_closed:
             await self._connection.close()
         if self._bot is not None:
             await self._bot.session.close()
+        self._lg.debug("TGSender stopped.")
 
     async def _on_message(self, message: AbstractIncomingMessage) -> None:
-        """Фильтр по каналу, отправка, ACK/NACK."""
+        """Filter by channel, deliver, then ACK or NACK.
+
+        Args:
+            message: Raw AMQP delivery from outgoing_messages.
+        """
         try:
             dto = OutgoingMessage.model_validate_json(message.body)
         except ValueError:
+            self._lg.warning("Malformed payload in outgoing queue.")
             await message.nack(requeue=False)
             return
         if dto.channel != "telegram":
+            self._lg.debug(f"Skipping non-telegram message {dto.user_id}.")
             await message.ack()
             return
 
         chat_id = await self._lookup_chat_id(dto.user_id)
         if chat_id is None:
             self._lg.warning(
-                "telegram_id не найден для user_id=%s — сообщение "
-                "не доставлено.",
-                dto.user_id,
+                f"telegram_id missing for user_id={dto.user_id} — "
+                "message dropped."
             )
             await message.ack()
             return
@@ -100,9 +115,8 @@ class TGSender(LoggerMixin):
             try:
                 await self._bot.send_message(chat_id=chat_id, text=dto.text)
                 self._lg.info(
-                    "Доставлено в Telegram: chat_id=%s, len=%d.",
-                    chat_id,
-                    len(dto.text),
+                    f"Delivered to Telegram: chat_id={chat_id}, "
+                    f"len={len(dto.text)}."
                 )
                 await message.ack()
                 return
@@ -113,23 +127,26 @@ class TGSender(LoggerMixin):
                 delay = 0.5 * (2**attempt)
                 reason = type(exc).__name__
             self._lg.warning(
-                "Попытка %d/%d не удалась (%s), повтор через %.1fs.",
-                attempt + 1,
-                _MAX_SEND_ATTEMPTS,
-                reason,
-                delay,
+                f"Attempt {attempt + 1}/{_MAX_SEND_ATTEMPTS} failed "
+                f"({reason}), retrying in {delay:.1f}s."
             )
             await asyncio.sleep(delay)
 
         self._lg.error(
-            "Не доставлено после %s попыток user_id=%s — DLQ.",
-            _MAX_SEND_ATTEMPTS,
-            dto.user_id,
+            f"Not delivered after {_MAX_SEND_ATTEMPTS} attempts, "
+            f"user_id={dto.user_id} — DLQ."
         )
         await message.nack(requeue=False)
 
     async def _lookup_chat_id(self, user_id: UUID) -> int | None:
-        """telegram_id пользователя для доставки."""
+        """Resolve the telegram_id of a user.
+
+        Args:
+            user_id: Internal user UUID.
+
+        Returns:
+            telegram_id, or None when the user/channel is unknown.
+        """
         async with self._session_factory() as session:
             repo = UsersRepo(session)
             user = await repo.get_by_id(user_id)

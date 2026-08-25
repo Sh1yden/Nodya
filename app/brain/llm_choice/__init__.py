@@ -1,4 +1,4 @@
-"""LLM-слой Ноди: провайдеры, роутер ролей, fallback-цепочки (ADR-6)."""
+"""LLM layer of Nodya: providers, role router, fallback chains (ADR-6)."""
 
 from .base import (
     ChatMessage,

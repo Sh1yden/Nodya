@@ -1,5 +1,7 @@
+"""Base declarative class for all SQLAlchemy models."""
+
 from sqlalchemy.orm import DeclarativeBase
 
 
 class Base(DeclarativeBase):
-    pass
+    """Common declarative base of the Nodya schema."""

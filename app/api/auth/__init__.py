@@ -1,4 +1,4 @@
-"""Аутентификация: register / login."""
+"""Authentication: register / login / me."""
 
 from .routes import router
 

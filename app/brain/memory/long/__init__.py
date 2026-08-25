@@ -1,4 +1,4 @@
-"""Long-term память: async-движок, фабрика сессий, зависимость FastAPI."""
+"""Long-term memory: async engine, session factory, FastAPI dep."""
 
 from .database import AsyncSessionLocal, engine, get_db
 

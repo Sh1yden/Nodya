@@ -1,6 +1,6 @@
-"""Точка входа Nodya: API Gateway + фоновые задачи в одном процессе.
+"""Entry point of Nodya: API Gateway + background tasks in one process.
 
-Поток: Telegram -> webhook (app.chats.telegram) -> RabbitMQ(incoming)
+Flow: Telegram -> webhook (app.chats.telegram) -> RabbitMQ(incoming)
 -> Worker -> RabbitMQ(outgoing) -> TGSender -> Telegram.
 """
 
@@ -33,7 +33,14 @@ _lg = get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Bootstrap (fail-fast) и graceful shutdown всех подсистем."""
+    """Bootstrap with fail-fast, then graceful shutdown of everything.
+
+    Args:
+        app: FastAPI application instance being started/stopped.
+
+    Yields:
+        None once the application is fully running.
+    """
     await _fail_fast()
     router = LLMRouter(
         gemini=GeminiProvider(settings.GEMINI_API_KEY),
@@ -60,7 +67,7 @@ async def lifespan(app: FastAPI):
     base_url = settings.TELEGRAM_WEBHOOK_URL.strip()
     ephemeral_webhook = not base_url
     if ephemeral_webhook:
-        _lg.info("WEBHOOK_URL пуст — поднимаю туннель.")
+        _lg.debug("No TELEGRAM_WEBHOOK_URL — starting cloudflared tunnel.")
         base_url, tunnel_process = await asyncio.to_thread(
             start_tunnel, settings.APP_PORT
         )
@@ -73,11 +80,11 @@ async def lifespan(app: FastAPI):
     ]
     app.state.publisher = publisher
     app.state.redis = redis_client
-    _lg.info("Nodya запущена. Вебхук: %s/webhook/telegram", base_url)
+    _lg.info(f"Nodya is up. Webhook: {base_url}/webhook/telegram")
 
     yield
 
-    _lg.info("Остановка Nodya...")
+    _lg.info("Stopping Nodya...")
     for task in background_tasks:
         task.cancel()
     await asyncio.gather(*background_tasks, return_exceptions=True)
@@ -85,6 +92,7 @@ async def lifespan(app: FastAPI):
     await sender.stop()
 
     if ephemeral_webhook:
+        # Ephemeral tunnel dies anyway; clear the stale URL at Telegram.
         with suppress(Exception):
             await bot.delete_webhook(drop_pending_updates=False)
     await bot.session.close()
@@ -97,13 +105,22 @@ async def lifespan(app: FastAPI):
 
 
 async def _fail_fast() -> None:
-    """Упасть при старте, если зависимость или ключ недоступны."""
+    """Abort startup when a dependency or credential is unavailable.
+
+    Raises:
+        RuntimeError: Empty token/API keys, or any infrastructure
+            service failing its ping.
+    """
     if not settings.TELEGRAM_BOT_TOKEN:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN пуст.")
+        _lg.critical("TELEGRAM_BOT_TOKEN is empty.")
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is empty.")
     if not settings.GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY пуст (aistudio.google.com).")
+        _lg.critical("GEMINI_API_KEY is empty.")
+        raise RuntimeError("GEMINI_API_KEY is empty.")
     if not settings.OPENROUTER_API_KEY:
-        raise RuntimeError("OPENROUTER_API_KEY пуст (openrouter.ai).")
+        _lg.critical("OPENROUTER_API_KEY is empty.")
+        raise RuntimeError("OPENROUTER_API_KEY is empty.")
+
     redis_probe = RedisClient(settings.redis_url)
     try:
         checks = {
@@ -117,18 +134,24 @@ async def _fail_fast() -> None:
         await redis_probe.close()
     failed = [name for name, ok in zip(checks, results, strict=True) if not ok]
     if failed:
-        raise RuntimeError(f"Bootstrap failed, недоступны: {failed}")
+        _lg.critical(f"Bootstrap failed, unreachable: {failed}")
+        raise RuntimeError(f"Bootstrap failed, unreachable: {failed}")
 
 
 async def _set_webhook(bot: Bot, base_url: str) -> None:
-    """delete старого URL + set нового с секретом (поправка 5).
+    """Delete the old webhook and set the new one with the secret.
 
-    drop_pending при delete=True — чистим хвост мёртвого прошлого
-    туннеля; на новом set pending=False: офлайн-сообщения простоя
-    доставляются после старта, а не выбрасываются.
+    drop_pending=True on delete clears leftovers of a dead previous
+    tunnel; the new set uses pending=False so offline messages of the
+    downtime get delivered instead of being discarded.
+
+    Args:
+        bot: aiogram Bot instance used for Telegram API calls.
+        base_url: Public base URL hosting /webhook/telegram.
     """
     url = f"{base_url.rstrip('/')}/webhook/telegram"
     await bot.delete_webhook(drop_pending_updates=True)
+    _lg.debug("Old webhook deleted.")
     await bot.set_webhook(
         url=url,
         secret_token=settings.TELEGRAM_WEBHOOK_SECRET,
@@ -136,12 +159,11 @@ async def _set_webhook(bot: Bot, base_url: str) -> None:
         drop_pending_updates=False,
     )
     info = await bot.get_webhook_info()
-    _lg.info("Вебхук активен: %s", info.url)
+    _lg.info(f"Webhook active: {info.url}")
     if info.pending_update_count:
         _lg.warning(
-            "В очереди Telegram %d офлайн-сообщений — будут "
-            "обработаны по мере доставки.",
-            info.pending_update_count,
+            f"{info.pending_update_count} offline messages queued in "
+            "Telegram — they will be processed on delivery."
         )
 
 

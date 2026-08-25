@@ -1,7 +1,7 @@
-"""Telegram webhook: проверка секрета и публикация в RabbitMQ.
+"""Telegram webhook: secret validation + publishing into RabbitMQ.
 
-Gateway намеренно не использует Dispatcher/хендлеры aiogram — только
-парсинг Update и публикацию IncomingMessage (принцип «только приём»).
+The Gateway deliberately avoids aiogram Dispatcher/handlers — only
+Update parsing and IncomingMessage publishing (receive-only principle).
 """
 
 import secrets
@@ -25,14 +25,25 @@ _SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def telegram_webhook(request: Request) -> dict[str, str]:
-    """Принять update от Telegram и опубликовать в очередь incoming."""
+    """Accept a Telegram update and publish it to the incoming queue.
+
+    Args:
+        request: Raw request carrying the Telegram update JSON.
+
+    Returns:
+        Short status dict: accepted / ignored.
+
+    Raises:
+        HTTPException 403: Secret header missing or mismatched.
+        HTTPException 400: Payload is not a valid Telegram update.
+    """
     _check_secret(request)
     publisher = request.app.state.publisher
     raw_update = await request.json()
     try:
         update = Update.model_validate(raw_update)
     except ValueError:
-        logger.warning("Невалидный payload вебхука Telegram.")
+        logger.warning("Rejected malformed Telegram webhook payload.")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="invalid update",
@@ -42,7 +53,7 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
     if chat_id is None:
         return {"status": "ignored"}
     if not text:
-        logger.debug("Non-text update проигнорирован: chat_id=%s", chat_id)
+        logger.debug(f"Ignored non-text update: chat_id={chat_id}")
         return {"status": "ignored"}
 
     message = IncomingMessage(
@@ -52,17 +63,24 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
         received_at=datetime.now(UTC),
     )
     await publisher.publish_incoming(message)
-    logger.info("Update принят: chat_id=%s, len=%d.", chat_id, len(text))
+    logger.debug(f"Update accepted: chat_id={chat_id}, len={len(text)}")
     return {"status": "accepted"}
 
 
 def _check_secret(request: Request) -> None:
-    """Сверить заголовок секрета с TELEGRAM_WEBHOOK_SECRET."""
+    """Compare the secret header with TELEGRAM_WEBHOOK_SECRET.
+
+    Args:
+        request: Incoming webhook request.
+
+    Raises:
+        HTTPException 403: Header absent or mismatched.
+    """
     received = request.headers.get(_SECRET_HEADER, "")
     if not settings.TELEGRAM_WEBHOOK_SECRET or not secrets.compare_digest(
         received, settings.TELEGRAM_WEBHOOK_SECRET
     ):
-        logger.warning("Вебхук с неверным секретом отклонён.")
+        logger.warning("Webhook rejected: bad secret header.")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="forbidden",
@@ -70,7 +88,15 @@ def _check_secret(request: Request) -> None:
 
 
 def _extract_text(update: Update) -> tuple[int | None, str]:
-    """Достать chat_id и текст из простого текстового сообщения."""
+    """Pull chat id and text from a plain text message.
+
+    Args:
+        update: Parsed Telegram update.
+
+    Returns:
+        Tuple of (chat_id, stripped text); (None, "") when the update
+        carries no text message.
+    """
     if update.message is None or update.message.text is None:
         return None, ""
     return (

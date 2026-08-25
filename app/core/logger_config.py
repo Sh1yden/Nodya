@@ -1,3 +1,6 @@
+"""Logging setup: colored console + JSONL file output."""
+
+import json
 import logging
 import os
 import sys
@@ -12,34 +15,31 @@ def setup_logging(
     console: bool = True,
     file: bool = True,
 ) -> None:
-    """
-    Настройка корневого логгера приложения.
-    Вызывается один раз при старте.
-    """
+    """Configure the root application logger once at startup.
 
+    Args:
+        level: Root log level name (DEBUG, INFO, ...).
+        log_dir: Directory for JSONL log files.
+        console: Attach a colored stdout handler.
+        file: Attach a JSONL file handler.
+    """
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # Корневой логгер приложения
     root_logger = logging.getLogger("nodya")
     root_logger.setLevel(getattr(logging, level.upper()))
-
-    # Очищаем существующие хендлеры
     root_logger.handlers.clear()
 
-    # === CONSOLE HANDLER ===
     if console:
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setLevel(logging.DEBUG)
-        console_formatter = ColoredConsoleFormatter()
-        console_handler.setFormatter(console_formatter)
+        console_handler.setFormatter(ColoredConsoleFormatter())
         root_logger.addHandler(console_handler)
 
-    # === FILE HANDLER ===
     if file:
         log_filename = f"{datetime.now().strftime('%Y-%m-%d')}-01.jsonl"
         log_filepath = log_dir / log_filename
 
-        # Найти свободный номер файла
+        # Find a free file index for today
         counter = 1
         while log_filepath.exists():
             counter += 1
@@ -50,33 +50,29 @@ def setup_logging(
 
         file_handler = logging.FileHandler(log_filepath, encoding="utf-8")
         file_handler.setLevel(logging.DEBUG)
-        json_formatter = JSONFormatter()
-        file_handler.setFormatter(json_formatter)
+        file_handler.setFormatter(JSONFormatter())
         root_logger.addHandler(file_handler)
 
-    # Отключаем пропагацию в root логгер Python
+    # Do not propagate into the Python root logger
     root_logger.propagate = False
 
-    # Настраиваем логгеры библиотек
     logging.getLogger("aiogram").setLevel(logging.WARNING)
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
 
 class Colors:
-    """ANSI цвета для терминала"""
+    """ANSI escape codes used by the console formatter."""
 
     RESET = "\033[0m"
 
-    # CONSOLE LOG
-    CURRENT_TIME_COLOR = "\u001b[34;1m"  # Светло синий
-    FILENAME_COLOR = "\u001b[32m"  # Зелёный
-    MODULE_COLOR = "\u001b[33m"  # Желтый
-    CLASS_COLOR = "\u001b[34m"  # Голубой
-    DEF_COLOR = "\u001b[36m"  # Синий
-    MESSAGE_COLOR = "\u001b[37m"  # Белый
+    CURRENT_TIME_COLOR = "\u001b[34;1m"
+    FILENAME_COLOR = "\u001b[32m"
+    MODULE_COLOR = "\u001b[33m"
+    CLASS_COLOR = "\u001b[34m"
+    DEF_COLOR = "\u001b[36m"
+    MESSAGE_COLOR = "\u001b[37m"
 
-    # LOG LVL
     RED = "\033[31m"
     GREEN = "\033[32m"
     YELLOW = "\033[33m"
@@ -86,7 +82,7 @@ class Colors:
 
 
 class ColoredConsoleFormatter(logging.Formatter):
-    """Кастомный форматтер для цветного вывода в консоль"""
+    """Human-readable colored formatter for stdout."""
 
     LEVEL_COLORS: ClassVar[dict[str, str]] = {
         "DEBUG": Colors.CYAN,
@@ -97,35 +93,43 @@ class ColoredConsoleFormatter(logging.Formatter):
     }
 
     def format(self, record: logging.LogRecord) -> str:
+        """Render a record as `time | LEVEL | file | module | func | msg`.
+
+        Args:
+            record: Log record to render.
+
+        Returns:
+            Colored single-line string.
+        """
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        level = record.levelname
         filename = (
             os.path.basename(record.pathname) if record.pathname else None
         )
         color = self.LEVEL_COLORS.get(record.levelname, Colors.RESET)
 
-        full_module = record.name
-        deff = record.funcName
-        message = record.getMessage()
-
-        colored_output = (
+        return (
             f"{Colors.CURRENT_TIME_COLOR}{current_time}{Colors.RESET} | "
-            f"{color}{level:<8}{Colors.RESET} | "
+            f"{color}{record.levelname:<8}{Colors.RESET} | "
             f"{Colors.FILENAME_COLOR}{filename}{Colors.RESET} | "
-            f"{Colors.MODULE_COLOR}{full_module}{Colors.RESET} | "
-            f"{Colors.DEF_COLOR}{deff}{Colors.RESET} | "
-            f"{message}"
+            f"{Colors.MODULE_COLOR}{record.name}{Colors.RESET} | "
+            f"{Colors.DEF_COLOR}{record.funcName}{Colors.RESET} | "
+            f"{record.getMessage()}"
         )
-
-        return colored_output
 
 
 class JSONFormatter(logging.Formatter):
-    """JSON форматтер"""
+    """Machine-readable JSONL formatter for log files."""
 
     def format(self, record: logging.LogRecord) -> str:
-        import json
+        """Render a record as a compact JSON object.
 
+        Args:
+            record: Log record to render.
+
+        Returns:
+            JSON string with timestamp, level, location and message.
+            Includes traceback under "exception" when present.
+        """
         filename = (
             os.path.basename(record.pathname) if record.pathname else None
         )
@@ -135,11 +139,10 @@ class JSONFormatter(logging.Formatter):
             "level": record.levelname,
             "filename": filename,
             "full_module": record.name,
-            "def": record.funcName,
+            "function": record.funcName,
             "message": record.getMessage(),
         }
 
-        # Добавляем traceback при ошибках
         if record.exc_info:
             log_entry["exception"] = self.formatException(record.exc_info)
 

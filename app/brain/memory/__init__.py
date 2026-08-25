@@ -1,1 +1,1 @@
-"""Многоуровневая память Ноди: short (Redis), long (PG), vector (Qdrant)."""
+"""Layered memory of Nodya: short (Redis), long (PG), vector (Qdrant)."""

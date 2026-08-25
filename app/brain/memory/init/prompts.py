@@ -1,8 +1,8 @@
-"""Системный промпт Ноди.
+"""System prompt of Nodya.
 
-Приоритет: файлы prompts/ME.md и prompts/RULES.md рядом с этим модулем
-(пишутся владельцем) -> встроенные дефолты + WARNING. Файлы читаются
-при каждом вызове — правки подхватываются без рестарта.
+Priority: prompts/ME.md and prompts/RULES.md next to this module
+(written by the owner) -> built-in defaults + WARNING. Files are read
+on every call — edits apply without a restart.
 """
 
 from pathlib import Path
@@ -29,7 +29,11 @@ _DEFAULT_RULES = (
 
 
 def load_system_prompt() -> str:
-    """ME.md + RULES.md из файлов или дефолты с предупреждением."""
+    """Assemble ME.md + RULES.md from files or defaults.
+
+    Returns:
+        Concatenated system prompt text.
+    """
     me = _read_or_default(PROMPTS_DIR / "ME.md", _DEFAULT_ME, "ME.md")
     rules = _read_or_default(
         PROMPTS_DIR / "RULES.md", _DEFAULT_RULES, "RULES.md"
@@ -38,13 +42,25 @@ def load_system_prompt() -> str:
 
 
 def _read_or_default(path: Path, default: str, name: str) -> str:
+    """Read a prompt file or fall back to the built-in default.
+
+    Args:
+        path: Prompt file path.
+        default: Built-in fallback content.
+        name: File name for log messages.
+
+    Returns:
+        Stripped file content, or the default with a WARNING logged.
+
+    Note:
+        The defaults stay Russian on purpose — they define which
+        language Nodya speaks until owner overrides them.
+    """
     if path.is_file():
         content = path.read_text(encoding="utf-8").strip()
         if content:
             return content
     logger.warning(
-        "Промпт %s не найден (%s) — используется встроенный дефолт.",
-        name,
-        path,
+        f"Prompt {name} not found ({path}) — using built-in default."
     )
     return default

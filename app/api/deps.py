@@ -1,4 +1,4 @@
-"""FastAPI-зависимости аутентификации."""
+"""FastAPI authentication dependencies."""
 
 from datetime import UTC, datetime
 from typing import Annotated
@@ -23,7 +23,22 @@ async def get_current_user(
     authorization: Annotated[str, Header()],
     session: _SessionDep,
 ) -> Users:
-    """Bearer-токен -> sha256 -> AuthTokens (не отозван) -> Users."""
+    """Resolve a user from a Bearer token.
+
+    Hashes the raw token with SHA-256, looks up a non-revoked row in
+    auth_tokens and refreshes last_used_at.
+
+    Args:
+        authorization: Raw Authorization header value.
+        session: Request-scoped database session.
+
+    Returns:
+        The authenticated Users object.
+
+    Raises:
+        HTTPException 401: Missing/malformed header, unknown token,
+            revoked token or dangling user reference.
+    """
     scheme, _, raw_token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not raw_token:
         raise _UNAUTHORIZED

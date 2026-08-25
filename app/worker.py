@@ -1,16 +1,17 @@
-"""Worker: consumer очереди incoming_messages.
+"""Worker: consumer of the incoming_messages queue.
 
-Полный цикл батча (ADR-12/15):
-1. Debounce: фиксированное окно DEBOUNCE_SECONDS с первого сообщения;
-   пачка копится в памяти, AMQP-сообщения не ACK до обработки.
-2. resolve_user: поиск/авторегистрация по external_id канала.
-3. Лок пользователя; занят -> пачка в nodya:scheduled (+30s),
+Full batch cycle (ADR-12/15):
+1. Debounce: fixed DEBOUNCE_SECONDS window from the first message;
+   the batch accumulates in process memory, AMQP messages stay
+   unacked until processing.
+2. resolve_user: lookup / auto-registration by channel external id.
+3. User lock; when busy -> batch into nodya:scheduled (+30s),
    retry_count >= MAX_SCHEDULED_RETRIES -> DLQ.
-4. Обработка (срез C: эхо; LLM появится в Этапе 5).
-5. Публикация OutgoingMessage и ACK всей пачки.
+4. Processing: LLM dialogue via LLMRouter (fallback chains).
+5. Publish OutgoingMessage(s) and ACK the whole batch.
 
-Отдельный poller каждые SCHEDULED_POLL_SECONDS переносит созревшие
-элементы nodya:scheduled обратно в обработку (ADR-13).
+A separate poller moves matured nodya:scheduled entries back into
+processing every SCHEDULED_POLL_SECONDS (ADR-13).
 """
 
 import asyncio
@@ -46,18 +47,19 @@ from app.core import LoggerMixin, settings
 
 _PREFETCH_COUNT = 50
 _THINKING_TTL_SECONDS = 300
+_HISTORY_LIMIT_FALLBACK = 20
 
 
 @dataclass(slots=True)
 class _PendingBatch:
-    """Пачка в debounce-буфере: AMQP-конверты + DTO."""
+    """Batch inside the debounce buffer: AMQP envelopes plus DTOs."""
 
     amqp_messages: list[AbstractIncomingMessage] = field(default_factory=list)
     dtos: list[IncomingMessage] = field(default_factory=list)
 
 
 class Worker(LoggerMixin):
-    """Обработчик входящих сообщений (Этапы 4–5, срез C: эхо)."""
+    """Processor of incoming messages (dialogue role)."""
 
     def __init__(
         self,
@@ -67,6 +69,15 @@ class Worker(LoggerMixin):
         publisher: MessagePublisher,
         router: LLMRouter,
     ) -> None:
+        """Store collaborators; no I/O happens here.
+
+        Args:
+            broker_url: AMQP DSN for the incoming consumer.
+            redis_client: Short-term memory client (locks/scheduled).
+            session_factory: Async session factory for DB access.
+            publisher: Outgoing publisher into RabbitMQ.
+            router: LLM router used for dialogue generation.
+        """
         self._url = broker_url
         self._redis = redis_client
         self._session_factory = session_factory
@@ -81,7 +92,8 @@ class Worker(LoggerMixin):
         self._timers: dict[str, asyncio.Task] = {}
 
     async def run(self) -> None:
-        """Подключиться к брокеру и начать consume."""
+        """Connect to the broker and start consuming incoming."""
+        self._lg.debug("Worker starting...")
         self._connection = await aio_pika.connect_robust(self._url)
         self._channel = await self._connection.channel()
         await self._channel.set_qos(prefetch_count=_PREFETCH_COUNT)
@@ -94,7 +106,7 @@ class Worker(LoggerMixin):
         await self._queue.consume(self._on_message)
 
     async def stop(self) -> None:
-        """Graceful shutdown: необработанные сообщения вернутся в очередь."""
+        """Graceful shutdown; unacked messages return to the queue."""
         self._running = False
         for timer in self._timers.values():
             timer.cancel()
@@ -107,22 +119,26 @@ class Worker(LoggerMixin):
             self._poller_task = None
         if self._connection is not None and not self._connection.is_closed:
             await self._connection.close()
+        self._lg.debug("Worker stopped.")
 
     async def _on_message(self, message: AbstractIncomingMessage) -> None:
-        """Приём из очереди: положить в debounce-буфер юзера."""
+        """Accept a delivery and place it into the user debounce buffer.
+
+        Args:
+            message: Raw AMQP delivery from incoming_messages.
+        """
         try:
             dto = IncomingMessage.model_validate_json(message.body)
         except ValueError:
-            self._lg.warning("Битый payload во входящей очереди.")
+            logger_payload = "Malformed payload in incoming queue."
+            self._lg.warning(logger_payload)
             await message.nack(requeue=False)
             return
 
         key = dto.user_external_id
-        self._lg.info(
-            "Сообщение получено: user=%s channel=%s len=%d.",
-            key,
-            dto.channel,
-            len(dto.text),
+        self._lg.debug(
+            f"Message received: user={key} channel={dto.channel} "
+            f"len={len(dto.text)}"
         )
         batch = self._buffers.get(key)
         if batch is None:
@@ -136,24 +152,22 @@ class Worker(LoggerMixin):
         batch.dtos.append(dto)
 
     async def _flush_after_debounce(self, key: str) -> None:
-        """Дождаться окна тишины и обработать накопленную пачку."""
+        """Wait out the silence window, then process the batch.
+
+        Args:
+            key: External user id owning the buffer.
+        """
         with suppress(asyncio.CancelledError):
             await asyncio.sleep(settings.DEBOUNCE_SECONDS)
         batch = self._buffers.pop(key, None)
         self._timers.pop(key, None)
         if batch is None or not self._running:
             return
-        self._lg.info(
-            "Debounce завершён: пачка n=%d user=%s.",
-            len(batch.dtos),
-            key,
-        )
+        self._lg.debug(f"Debounce finished: batch n={len(batch.dtos)}")
         try:
             await self._process_batch(batch.dtos, batch.amqp_messages)
-        except Exception:
-            self._lg.exception(
-                "Пачка user_external_id=%s упала, уходит в DLQ.", key
-            )
+        except Exception as exc:
+            self._lg.error(f"Batch failed for user={key}: {exc}")
             for amqp_message in batch.amqp_messages:
                 await amqp_message.nack(requeue=False)
 
@@ -162,15 +176,19 @@ class Worker(LoggerMixin):
         dtos: list[IncomingMessage],
         amqp_messages: list[AbstractIncomingMessage],
     ) -> None:
-        """Лок -> обработка -> публикация -> ACK пачки."""
+        """Resolve user, take the lock, handle, publish, ACK.
+
+        Args:
+            dtos: Parsed incoming messages of the batch.
+            amqp_messages: Matching raw deliveries to acknowledge.
+        """
         first = dtos[0]
         user = await self._resolve_user(first.channel, first.user_external_id)
         lock_token = await self._redis.acquire_lock(user.user_id)
         if lock_token is None:
             self._lg.warning(
-                "Лок user_id=%s занят, пачка отложена на %ss.",
-                user.user_id,
-                settings.SCHEDULED_POLL_SECONDS,
+                f"Lock busy for user_id={user.user_id}, postponing "
+                f"batch by {settings.SCHEDULED_POLL_SECONDS}s."
             )
             await self._defer_incoming(dtos, amqp_messages, retry=0)
             return
@@ -178,10 +196,8 @@ class Worker(LoggerMixin):
             await self._run_locked(user.user_id, dtos)
         finally:
             await self._redis.release_lock(user.user_id, lock_token)
-        self._lg.info(
-            "Пачка обработана и опубликована: n=%d user_id=%s.",
-            len(dtos),
-            user.user_id,
+        self._lg.debug(
+            f"Batch processed: n={len(dtos)} user_id={user.user_id}"
         )
         for amqp_message in amqp_messages:
             await amqp_message.ack()
@@ -189,32 +205,44 @@ class Worker(LoggerMixin):
     async def _run_locked(
         self, user_id: UUID, dtos: list[IncomingMessage]
     ) -> list[OutgoingMessage]:
-        """Обработка под взятым локом: state, решение, контекст.
+        """Handle a batch under an already-taken lock.
 
-        thinking ставится с TTL — при крэше воркера статус не зависнет
-        навсегда, а отпустится сам через _THINKING_TTL_SECONDS.
+        Sets thinking with a TTL (a crashed worker releases the state
+        automatically), asks the proactive decision stub, generates
+        the reply, saves context and returns to idle.
+
+        Args:
+            user_id: Internal user UUID.
+            dtos: Batch messages to answer.
+
+        Returns:
+            Published outgoing messages.
         """
         decision = self._proactive_decision()
         if decision != "now":
-            self._lg.info(
-                "Proactive decision=%s для user_id=%s — ветка появится "
-                "вместе с LLM (D3/D6).",
-                decision,
-                user_id,
-            )
+            # TODO(stage-7): implement delay/skip branches together
+            # with the RSS parser and delayed outgoing.
+            self._lg.debug(f"Proactive decision={decision} for {user_id}")
         await self._redis.set_state(
             user_id, "thinking", ttl=_THINKING_TTL_SECONDS
         )
+        self._lg.debug(f"State thinking: user_id={user_id}")
         outgoing = await self._handle_dtos(user_id, dtos)
         await self._save_dialog_context(user_id, dtos, outgoing)
         await self._redis.set_state(user_id, "idle")
+        self._lg.debug(f"State idle: user_id={user_id}")
         return outgoing
 
-    def _proactive_decision(self) -> str:
-        """Заглушка Этапа 4: пока всегда немедленный ответ.
+    @staticmethod
+    def _proactive_decision() -> str:
+        """Decide how to react to a batch.
 
-        Рандом 70% now / 20% delay / 10% skip подключается вместе
-        с LLM-слоем (D3) и проактивностью (Этап 7).
+        Stub of TODO_MASTER stage 4: always answers immediately.
+        The 70% now / 20% delay / 10% skip random arrives together
+        with proactivity work (stage 7).
+
+        Returns:
+            One of "now" / "delay" / "skip"; currently always "now".
         """
         return "now"
 
@@ -224,7 +252,13 @@ class Worker(LoggerMixin):
         incoming: list[IncomingMessage],
         outgoing: list[OutgoingMessage],
     ) -> None:
-        """История диалога в Redis (ADR-10): user + assistant парами."""
+        """Persist the turn into short-term history (ADR-10).
+
+        Args:
+            user_id: Internal user UUID.
+            incoming: User messages of the batch.
+            outgoing: Replies published for the batch.
+        """
         now = datetime.now(UTC)
         context: list[ContextMessage] = [
             ContextMessage(role="user", content=d.text, timestamp=now)
@@ -236,32 +270,39 @@ class Worker(LoggerMixin):
         ]
         try:
             await self._redis.push_context_many(user_id, context)
-        except Exception:
-            self._lg.exception(
-                "Контекст диалога не записан: user_id=%s.", user_id
-            )
+        except Exception as exc:
+            self._lg.error(f"Context not saved for {user_id}: {exc}")
 
     async def _handle_dtos(
         self, user_id: UUID, dtos: list[IncomingMessage]
     ) -> list[OutgoingMessage]:
-        """Один ответ Ноди на всю пачку (суть debounce, ADR-12)."""
-        history = await self._redis.get_context(
-            user_id, limit=settings.LLM_HISTORY_LIMIT
-        )
+        """Generate one reply for the whole batch (ADR-12 debounce).
+
+        Assembles system prompt (ME/RULES), Redis history and the
+        joined batch text, then routes through the dialogue chain.
+
+        Args:
+            user_id: Internal user UUID.
+            dtos: Batch messages to answer.
+
+        Returns:
+            The single published reply wrapped in a list.
+        """
+        limit = settings.LLM_HISTORY_LIMIT or _HISTORY_LIMIT_FALLBACK
+        history = await self._redis.get_context(user_id, limit=limit)
         chat: list[ChatMessage] = [
             ChatMessage(role="system", content=load_system_prompt())
         ]
         chat += [ChatMessage(role=m.role, content=m.content) for m in history]
         chat.append(
-            ChatMessage(
-                role="user",
-                content="\n".join(d.text for d in dtos),
-            )
+            ChatMessage(role="user", content="\n".join(d.text for d in dtos))
         )
+
         response = await self._router.generate_with_fallback("dialogue", chat)
         reply_text = response.text or (
-            "Что-то я задумалась и потеряла мысль. Повтори?"
+            "I lost my train of thought there. Could you repeat?"
         )
+        self._lg.debug(f"LLM reply len={len(reply_text)}")
 
         outgoing = OutgoingMessage(
             user_id=user_id,
@@ -278,10 +319,15 @@ class Worker(LoggerMixin):
         incoming: list[IncomingMessage],
         outgoing: list[OutgoingMessage],
     ) -> None:
-        """Записать пачку в messages (ADR-14).
+        """Write the batch into the messages archive (ADR-14).
 
-        Деградация: сбой архива не роняет обработку — лог ERROR
-        и продолжение (аналогично Qdrant в §9).
+        Degraded mode: archive failure never breaks processing —
+        log ERROR and continue (same policy as Qdrant, §9).
+
+        Args:
+            user_id: Internal user UUID.
+            incoming: User messages of the batch.
+            outgoing: Replies published for the batch.
         """
         rows = [
             Messages(
@@ -305,15 +351,26 @@ class Worker(LoggerMixin):
             async with self._session_factory() as session:
                 session.add_all(rows)
                 await session.commit()
-        except Exception:
-            self._lg.exception(
-                "Архив messages не записан для user_id=%s.", user_id
-            )
+            self._lg.debug(f"Archived {len(rows)} messages.")
+        except Exception as exc:
+            self._lg.error(f"Messages archive failed for {user_id}: {exc}")
 
     async def _resolve_user(self, channel: str, external_id: str) -> Users:
-        """Найти пользователя по external_id канала или создать."""
+        """Find a user by channel external id or auto-register one.
+
+        Args:
+            channel: Channel name ("telegram" only for now).
+            external_id: Channel-specific user id.
+
+        Returns:
+            Existing or freshly created Users row.
+
+        Raises:
+            ValueError: Channel has no resolver yet.
+            IntegrityError: Registration race lost and re-read failed.
+        """
         if channel != "telegram":
-            raise ValueError(f"Канал {channel} пока не поддерживается.")
+            raise ValueError(f"Channel '{channel}' is not supported yet.")
         telegram_id = int(external_id)
         async with self._session_factory() as session:
             repo = UsersRepo(session)
@@ -336,15 +393,21 @@ class Worker(LoggerMixin):
                 if user is None:
                     raise
             self._lg.info(
-                "Новый пользователь: telegram_id=%s -> user_id=%s.",
-                telegram_id,
-                user.user_id,
+                f"New user registered: telegram_id={telegram_id} -> "
+                f"user_id={user.user_id}."
             )
             return user
 
     @staticmethod
     def _generated_username(telegram_id: int) -> str:
-        """Username для TG-авторегистрации (уникален, до 20 символов)."""
+        """Build a unique username for TG auto-registration.
+
+        Args:
+            telegram_id: Telegram user id.
+
+        Returns:
+            Username within the String(20) column limits.
+        """
         return f"tg_{telegram_id}"[:20]
 
     async def _defer_incoming(
@@ -353,14 +416,20 @@ class Worker(LoggerMixin):
         amqp_messages: list[AbstractIncomingMessage],
         retry: int,
     ) -> None:
-        """Занятый лок: nodya:scheduled(+30s) либо DLQ (ADR-15)."""
+        """Busy-lock path: schedule retry or dead-letter (ADR-15).
+
+        Args:
+            dtos: Batch that could not be processed right now.
+            amqp_messages: Raw deliveries to acknowledge (may be empty
+                when called from the poller).
+            retry: Current retry counter value.
+        """
         envelope = ScheduledEnvelope(
             kind="incoming", incoming=dtos, retry_count=retry
         )
         if retry >= settings.MAX_SCHEDULED_RETRIES:
             self._lg.error(
-                "Пачка превышает MAX_SCHEDULED_RETRIES (%s) — DLQ.",
-                retry,
+                f"Batch exceeded MAX_SCHEDULED_RETRIES ({retry}) — DLQ."
             )
             await self._publisher.publish_dead_letter(
                 envelope.model_dump_json().encode()
@@ -371,25 +440,34 @@ class Worker(LoggerMixin):
                 envelope.model_dump_json(),
                 time.time() + delay,
             )
+            self._lg.debug(f"Batch deferred by {delay}s (retry {retry}).")
         for amqp_message in amqp_messages:
             await amqp_message.ack()
 
     async def _scheduled_poller(self) -> None:
-        """Перенос созревших элементов nodya:scheduled в работу."""
+        """Move matured nodya:scheduled entries back into processing.
+
+        Runs forever; per-entry failures are logged and swallowed so
+        one bad envelope cannot kill the poller.
+        """
         while True:
             await asyncio.sleep(settings.SCHEDULED_POLL_SECONDS)
             due = await self._redis.pop_due_scheduled(time.time())
+            if due:
+                self._lg.debug(f"Scheduled tasks matured: n={len(due)}")
             for raw in due:
                 try:
                     envelope = ScheduledEnvelope.model_validate_json(raw)
                     await self._process_scheduled(envelope)
-                except Exception:
-                    self._lg.exception(
-                        "Ошибка обработки отложенной задачи: %.200s", raw
-                    )
+                except Exception as exc:
+                    self._lg.error(f"Scheduled task failed: {exc}")
 
     async def _process_scheduled(self, envelope: ScheduledEnvelope) -> None:
-        """Выполнить одну созревшую задачу из ZSet."""
+        """Execute one matured scheduled task.
+
+        Args:
+            envelope: Parsed ZSet entry (incoming batch or outgoing).
+        """
         if envelope.kind == "outgoing":
             assert envelope.outgoing is not None
             await self._publisher.publish_outgoing(envelope.outgoing)

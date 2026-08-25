@@ -1,4 +1,4 @@
-"""Short-term память: Redis-клиент и доменные модели состояний."""
+"""Short-term memory: Redis client and domain state models."""
 
 from .redis import ContextMessage, DialogueState, RedisClient
 

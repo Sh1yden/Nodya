@@ -1,8 +1,8 @@
-"""Абстракция LLM-провайдера и DTO ответов.
+"""LLM provider abstraction and response DTOs.
 
-Ошибки разделены на transient (сеть/429/5xx — можно ретраить) и fatal
-(остальные 4xx — кандидата пропускаем сразу), роутер строит поведение
-на этом делении.
+Errors are split into transient (network/429/5xx — retryable) and
+fatal (other 4xx — skip the candidate immediately); the router builds
+its behaviour on this distinction.
 """
 
 from abc import ABC, abstractmethod
@@ -14,43 +14,43 @@ Role = Literal["dialogue", "cs", "bp", "vs"]
 
 
 class LLMError(Exception):
-    """База ошибок LLM-слоя."""
+    """Base error of the LLM layer."""
 
 
 class LLMTransientError(LLMError):
-    """Временный сбой: сеть, 429, 5xx."""
+    """Temporary failure: network, 429, 5xx."""
 
 
 class LLMFatalError(LLMError):
-    """Постоянный сбой кандидата: 4xx, неверная модель, отказ доступа."""
+    """Permanent failure of a candidate: 4xx, unknown model, no access."""
 
 
 class ToolCall(BaseModel):
-    """Вызов инструмента моделью (заполняется с Этапа 5)."""
+    """A tool invocation requested by the model (used from stage 5)."""
 
     name: str
     arguments: dict[str, Any]
 
 
 class LLMResponse(BaseModel):
-    """Ответ модели: текст и/или запросы инструментов."""
+    """Model reply: text and/or requested tool calls."""
 
     text: str | None = None
     tool_calls: list[ToolCall] = []
 
 
 class ChatMessage(BaseModel):
-    """Сообщение в формате чата."""
+    """A chat-format conversation message."""
 
     role: Literal["system", "user", "assistant"]
     content: str
 
 
 class LLMProvider(ABC):
-    """Единый интерфейс чат-моделей и эмбеддингов.
+    """Unified interface for chat models and embeddings.
 
-    tools зарезервирован для SkillRegistry (Этап 5); до тех пор
-    провайдеры игнорируют его.
+    `tools` is reserved for SkillRegistry (stage 5); until then
+    providers ignore it.
     """
 
     @abstractmethod
@@ -60,8 +60,8 @@ class LLMProvider(ABC):
         model: str,
         tools: list[dict[str, Any]] | None = None,
     ) -> LLMResponse:
-        """Сгенерировать ответ чата указанной моделью."""
+        """Generate a chat reply with the given model."""
 
     @abstractmethod
     async def embed(self, texts: list[str], model: str) -> list[list[float]]:
-        """Векторизовать тексты (VS-роль)."""
+        """Vectorize texts (VS role)."""

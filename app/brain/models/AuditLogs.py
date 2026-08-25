@@ -1,8 +1,17 @@
+"""AuditLogs model: every skill invocation is recorded here."""
+
 from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Uuid, func
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Uuid,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -10,6 +19,8 @@ from .Base import Base
 
 
 class AuditLogs(Base):
+    """An audit record of a skill call (who/what/with what/status)."""
+
     __tablename__ = "audit_logs"
 
     log_id: Mapped[int] = mapped_column(

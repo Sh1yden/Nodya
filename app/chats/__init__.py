@@ -1,6 +1,7 @@
-"""Каналы связи Ноди: приём и доставка по каждому чату.
+"""Channels of Nodya: per-chat receiving and delivery.
 
-Один подпакет на канал (telegram/, позже browser/, discord/) держит
-вместе webhook (HTTP-приём в Gateway) и sender (RabbitMQ-consumer
-доставки). Между приёмом и доставкой по-прежнему только очередь.
+One subpackage per channel (telegram/, later browser/, discord/)
+keeps the webhook (HTTP intake in the Gateway) and the sender
+(RabbitMQ consumer for delivery) together. Only the queue connects
+the two sides.
 """

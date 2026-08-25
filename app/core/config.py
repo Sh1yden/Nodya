@@ -1,3 +1,5 @@
+"""Typed application settings loaded from .env (pydantic-settings)."""
+
 from urllib.parse import quote
 
 from pydantic import Field, computed_field
@@ -5,26 +7,26 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class SettingsSchema(BaseSettings):
-    """Схема настроек приложения"""
+    """All environment variables of the Nodya application."""
 
-    # Логирование
+    # Logging
     LOG_LEVEL: str = Field(default="DEBUG")
 
     # HTTP
     APP_PORT: int = Field(default=8014)
 
-    # Sys skills
+    # System skills
     SYSTEM_SKILLS_ENABLED: bool = Field(
-        default=False, description="Skills enabled in system of run"
+        default=False, description="Enable system-tier skills execution."
     )
     SANDBOX_ENABLED: bool = Field(
         default=True,
-        description="Sandbox mode(in docker container) for skills.",
+        description="Run sandboxed skills inside a Docker container.",
     )
 
-    # Owner sys
+    # Owner
     OWNER_USERNAME: str = Field(
-        default="Shayden", description="Admin username."
+        default="Shayden", description="Owner username."
     )
 
     # PostgreSQL
@@ -50,13 +52,13 @@ class SettingsSchema(BaseSettings):
     QDRANT_HOST: str = Field(default="localhost")
     QDRANT_PORT: int = Field(default=6333)
 
-    # AI API'S (строгая проверка при инициализации провайдеров в main)
+    # AI APIs (validated strictly at provider init in main)
     GEMINI_API_KEY: str = Field(default="")
     OPENROUTER_API_KEY: str = Field(default="")
 
-    # LLM-роли (матрица из tldr: D/CS/BP/VS).
-    # Цепочки — порядок кандидатов через запятую; после Gemini-части
-    # роутер добавляет OpenRouter-fallback (nemotron пара).
+    # LLM roles (matrix from the Nodya tldr notes: D/CS/BP/VS).
+    # Chains are comma-separated candidate lists; after the Gemini part
+    # the router appends the OpenRouter nemotron fallback pair.
     LLM_DIALOGUE_GEMINI: str = Field(
         default="gemini-3.5-flash-lite,gemini-3.1-flash-lite"
     )
@@ -73,24 +75,23 @@ class SettingsSchema(BaseSettings):
     LLM_EMBED_MODEL: str = Field(default="gemini-embedding-2")
     LLM_HISTORY_LIMIT: int = Field(default=20)
 
-    # Chats tokens
     # Telegram
     TELEGRAM_BOT_TOKEN: str = Field(default="")
     TELEGRAM_WEBHOOK_URL: str = Field(
         default="",
         description=(
-            "Публичный базовый URL вебхука. "
-            "Пусто -> туннель cloudflared (только локальный запуск)."
+            "Public base URL of the webhook. Empty -> cloudflared "
+            "tunnel (local runs only)."
         ),
     )
     TELEGRAM_WEBHOOK_SECRET: str = Field(
-        description="Секрет заголовка X-Telegram-Bot-Api-Secret-Token."
+        description="Secret for the X-Telegram-Bot-Api-Secret-Token header."
     )
 
-    # Туннель (локальная разработка)
+    # Tunnel (local development)
     TUNNEL_TIMEOUT: int = Field(default=30)
 
-    # Worker (поправки 1/2/4)
+    # Worker (amendments 1/2/4)
     DEBOUNCE_SECONDS: int = Field(default=5)
     SCHEDULED_POLL_SECONDS: int = Field(default=30)
     MAX_SCHEDULED_RETRIES: int = Field(default=5)
@@ -98,6 +99,7 @@ class SettingsSchema(BaseSettings):
     @computed_field
     @property
     def rabbitmq_url(self) -> str:
+        """AMQP URL with the percent-encoded vhost path."""
         vhost = quote(self.RABBITMQ_VHOST, safe="")
         return (
             f"amqp://"
@@ -108,6 +110,7 @@ class SettingsSchema(BaseSettings):
     @computed_field
     @property
     def postgres_url(self) -> str:
+        """SQLAlchemy async DSN for the application database."""
         return (
             f"postgresql+{self.POSTGRES_ASYNCPG}://"
             f"{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@"
@@ -117,6 +120,7 @@ class SettingsSchema(BaseSettings):
     @computed_field
     @property
     def redis_url(self) -> str:
+        """Redis connection URL for short-term memory."""
         return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/0"
 
     model_config = SettingsConfigDict(
@@ -127,5 +131,5 @@ class SettingsSchema(BaseSettings):
     )
 
 
-# Глобальный экземпляр настроек
+# Global settings instance
 settings = SettingsSchema()

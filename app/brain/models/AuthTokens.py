@@ -1,8 +1,17 @@
+"""AuthTokens model: hashed opaque access tokens (ADR-3)."""
+
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Uuid, func
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Uuid,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .Base import Base
@@ -12,6 +21,8 @@ if TYPE_CHECKING:
 
 
 class AuthTokens(Base):
+    """An issued access token; plaintext is never stored."""
+
     __tablename__ = "auth_tokens"
 
     token_id: Mapped[int] = mapped_column(

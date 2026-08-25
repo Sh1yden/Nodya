@@ -1,8 +1,18 @@
+"""HardFacts model: long-term structured facts per user."""
+
 from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Uuid, func
+from sqlalchemy import (
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Uuid,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -10,6 +20,8 @@ from .Base import Base
 
 
 class HardFacts(Base):
+    """A durable fact extracted from dialogues (consolidation)."""
+
     __tablename__ = "hard_facts"
 
     fact_id: Mapped[int] = mapped_column(

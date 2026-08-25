@@ -1,6 +1,7 @@
-"""Обменные схемы (DTO) для транспорта через RabbitMQ.
+"""Transport DTOs exchanged via RabbitMQ.
 
-Только Pydantic-модели: SQLAlchemy-объекты между процессами не ходят.
+Pydantic models only: SQLAlchemy objects never cross process
+boundaries.
 """
 
 from datetime import datetime
@@ -13,7 +14,7 @@ Channel = Literal["telegram", "discord", "browser", "cli"]
 
 
 class IncomingMessage(BaseModel):
-    """Сообщение пользователя, принятое каналом."""
+    """A user message accepted from a channel."""
 
     user_external_id: str
     channel: Channel
@@ -22,7 +23,7 @@ class IncomingMessage(BaseModel):
 
 
 class OutgoingMessage(BaseModel):
-    """Ответ/проактивное сообщение Ноди для доставки в канал."""
+    """A reply or proactive message of Nodya for delivery."""
 
     user_id: UUID
     channel: Channel
@@ -31,12 +32,13 @@ class OutgoingMessage(BaseModel):
 
 
 class ScheduledEnvelope(BaseModel):
-    """Элемент ZSet ``nodya:scheduled`` (ADR-13/15).
+    """An entry of the ``nodya:scheduled`` ZSet (ADR-13/15).
 
-    Единый конверт для двух случаев:
-    - ``kind="incoming"`` — пачка входящих, отложенная из-за занятого
-      лока (``retry_count`` растёт при повторных неудачах);
-    - ``kind="outgoing"`` — исходящее с ``delay_until`` в будущем.
+    Single envelope for two cases:
+    - ``kind="incoming"`` — an incoming batch postponed because the
+      user lock was busy (``retry_count`` grows on repeats);
+    - ``kind="outgoing"`` — an outgoing message whose ``delay_until``
+      lies in the future.
     """
 
     kind: Literal["incoming", "outgoing"]

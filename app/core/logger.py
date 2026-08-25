@@ -1,42 +1,43 @@
+"""Logger factory and mixin with the `nodya` namespace."""
+
 import inspect
 import logging
 
+_ROOT_PREFIX = "nodya"
+
 
 def get_logger(name: str | None = None) -> logging.Logger:
-    """Получить настроенный логгер для модуля монолита.
+    """Return a namespaced logger for a module of the monolith.
 
     Args:
-        name: Имя логгера. Если None, используется имя вызывающего модуля.
+        name: Logger name. When None, the caller module `__name__`
+            is used. `__main__` is mapped to the root prefix.
 
     Returns:
-        logging.Logger: Настроенный логгер с корректным пространством имен.
+        logging.Logger under the "nodya" hierarchy.
     """
     if name is None:
         frame = inspect.currentframe()
         if frame and frame.f_back:
             name = frame.f_back.f_globals.get("__name__", "unknown")
 
-    root_prefix = "nodya"
-
-    # Если модуль запущен напрямую, заменяем __main__ на имя папки для красоты
     if name == "__main__":
-        name = root_prefix
-    elif name and not name.startswith(f"{root_prefix}."):
-        # Если имя модуля уже начинается с "app.", не дублируем его
+        name = _ROOT_PREFIX
+    elif name and not name.startswith(f"{_ROOT_PREFIX}."):
         if name.startswith("__main__."):
-            name = name.replace("__main__.", f"{root_prefix}.", 1)
+            name = name.replace("__main__.", f"{_ROOT_PREFIX}.", 1)
         else:
-            name = f"{root_prefix}.{name}"
+            name = f"{_ROOT_PREFIX}.{name}"
 
     return logging.getLogger(name)
 
 
 class LoggerMixin:
-    """Миксин для автоматической инициализации логгера внутри классов."""
+    """Mixin that lazily binds a class-scoped logger via `_lg`."""
 
     @property
     def _lg(self) -> logging.Logger:
-        """Логгер, привязанный к конкретному модулю и классу."""
+        """Logger named after the concrete module and class."""
         if not hasattr(self, "_logger"):
             class_name = self.__class__.__name__
             module_name = self.__class__.__module__

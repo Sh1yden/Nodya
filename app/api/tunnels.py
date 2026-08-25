@@ -1,11 +1,11 @@
-"""Туннель cloudflared для локальной разработки: публичный URL вебхука.
+"""cloudflared quick-tunnel for local development: public webhook URL.
 
-Только cloudflared quick-tunnel: tuna отклонена (RU-сегмент, обход
-блокировок не тянет). Внутри Docker бинарника нет — там обязателен
-явный TELEGRAM_WEBHOOK_URL.
+Tuna was rejected (RU segment). Inside Docker the binary is absent —
+an explicit TELEGRAM_WEBHOOK_URL is mandatory there.
 
-Важно: после извлечения URL stdout процесса передаётся потоку-drain —
-без него буфер пайпа (~64КБ) переполняется и туннель замолкает.
+Important: after extracting the URL, the process stdout must be
+drained by a background thread — otherwise the OS pipe buffer
+(~64KB) fills up and the tunnel silently freezes.
 """
 
 import re
@@ -22,12 +22,23 @@ _URL_PATTERN = re.compile(r"https://[a-z0-9.-]+\.trycloudflare\.com")
 
 
 def start_tunnel(port: int) -> tuple[str, subprocess.Popen]:
-    """Запустить туннель, вернуть (публичный URL, процесс).
+    """Start a tunnel and return its public URL with the process.
 
-    --protocol http2: QUIC (UDP) тихо умирает за VPN/NAT — TCP-режим
-    стабилен. URL из баннера появляется ДО регистрации на edge, поэтому
-    после него дожидаемся строки Registered tunnel connection: без неё
-    край Cloudflare отвечает пустым 404 на все пути.
+    Uses --protocol http2: QUIC (UDP) silently dies behind VPN/NAT,
+    TCP mode is stable. The banner URL appears BEFORE edge
+    registration, so we additionally wait for the "Registered tunnel
+    connection" line — without it the Cloudflare edge answers bare
+    404 on every path.
+
+    Args:
+        port: Local port the origin service listens on.
+
+    Returns:
+        Tuple of (public URL, running cloudflared process).
+
+    Raises:
+        RuntimeError: Binary missing, URL timeout or no edge
+            registration within the timeout.
     """
     cmd = [
         "cloudflared",
@@ -39,45 +50,55 @@ def start_tunnel(port: int) -> tuple[str, subprocess.Popen]:
         "--output",
         "json",
     ]
-    logger.info("Запуск cloudflared (http2) на порт %s...", port)
+    logger.info(f"Starting cloudflared (http2) on port {port}...")
     process = _popen(cmd)
     url = _read_url(process)
     if url is None:
         process.terminate()
         raise RuntimeError(
-            f"cloudflared не отдал URL за {_TIMEOUT}с "
-            "(или завершился с ошибкой — см. логи выше)."
+            f"cloudflared produced no URL in {_TIMEOUT}s "
+            "(or exited with an error — see logs above)."
         )
     if not _wait_registered(process):
         process.terminate()
         raise RuntimeError(
-            "cloudflared не зарегистрировал соединение на edge "
-            f"за {_TIMEOUT}с — туннель не рабочий."
+            f"cloudflared did not register at the edge in {_TIMEOUT}s "
+            "— tunnel is not usable."
         )
-    logger.info("Туннель готов: %s", url)
+    logger.info(f"Tunnel ready: {url}")
     time.sleep(2)
     _drain_stdout(process)
     return url, process
 
 
 def stop_tunnel(process: subprocess.Popen | None) -> None:
-    """Остановить процесс туннеля при graceful shutdown."""
+    """Terminate the tunnel process on graceful shutdown."""
     if process is None:
         return
     try:
         process.terminate()
         process.wait(timeout=3)
-        logger.info("Туннель остановлен.")
+        logger.info("Tunnel stopped.")
     except Exception:
         try:
             process.kill()
-            logger.warning("Туннель снят принудительно.")
+            logger.warning("Tunnel force-killed.")
         except Exception as exc:
-            logger.error("Не удалось завершить туннель: %s", exc)
+            logger.error(f"Failed to terminate tunnel: {exc}")
 
 
 def _popen(cmd: list[str]) -> subprocess.Popen:
-    """Popen с понятной ошибкой, если бинарника нет в системе."""
+    """Spawn a process with a clear error when binary is missing.
+
+    Args:
+        cmd: Command line to execute.
+
+    Returns:
+        Started subprocess with piped stdout.
+
+    Raises:
+        RuntimeError: The executable was not found.
+    """
     try:
         return subprocess.Popen(
             cmd,
@@ -88,13 +109,20 @@ def _popen(cmd: list[str]) -> subprocess.Popen:
         )
     except FileNotFoundError as exc:
         raise RuntimeError(
-            f"Бинарник не найден: {cmd[0]}. Установите cloudflared "
-            "или задайте TELEGRAM_WEBHOOK_URL."
+            f"Binary not found: {cmd[0]}. Install cloudflared "
+            "or set TELEGRAM_WEBHOOK_URL."
         ) from exc
 
 
 def _read_url(process: subprocess.Popen) -> str | None:
-    """Блокирующе читать логи до появления публичного URL."""
+    """Read tunnel JSON logs until a public URL appears.
+
+    Args:
+        process: Running cloudflared subprocess.
+
+    Returns:
+        Public URL, or None on timeout/EOF.
+    """
     started_at = time.monotonic()
 
     assert process.stdout is not None
@@ -107,12 +135,20 @@ def _read_url(process: subprocess.Popen) -> str | None:
         match = _URL_PATTERN.search(line)
         if match:
             return match.group(0)
-        logger.debug("[cloudflared] %s", line[:200])
+        logger.debug(f"[cloudflared] {line[:200]}")
     return None
 
 
 def _wait_registered(process: subprocess.Popen, timeout: int = 20) -> bool:
-    """Дождаться фактической регистрации туннеля на edge."""
+    """Wait until the tunnel is actually registered at the edge.
+
+    Args:
+        process: Running cloudflared subprocess.
+        timeout: Max seconds to wait for registration.
+
+    Returns:
+        True once "Registered tunnel connection" is seen.
+    """
     started_at = time.monotonic()
 
     assert process.stdout is not None
@@ -122,16 +158,19 @@ def _wait_registered(process: subprocess.Popen, timeout: int = 20) -> bool:
         line = line.strip()
         if not line:
             continue
-        logger.debug("[cloudflared] %s", line[:200])
+        logger.debug(f"[cloudflared] {line[:200]}")
         if "Registered tunnel connection" in line:
             return True
         if '"level":"fatal"' in line or '"level":"error"' in line:
-            logger.error("[cloudflared] %s", line[:200])
+            logger.error(f"[cloudflared] {line[:200]}")
     return False
 
 
 def _drain_stdout(process: subprocess.Popen) -> None:
-    """Фоновый drain логов туннеля на DEBUG (защита от переполнения)."""
+    """Hand the pipe to a daemon thread that keeps draining it.
+
+    Without this the OS pipe buffer fills and the tunnel freezes.
+    """
     thread = threading.Thread(
         target=_drain_loop,
         args=(process,),
@@ -142,8 +181,9 @@ def _drain_stdout(process: subprocess.Popen) -> None:
 
 
 def _drain_loop(process: subprocess.Popen) -> None:
+    """Consume stdout forever, relaying lines at DEBUG level."""
     assert process.stdout is not None
     for line in process.stdout:
         line = line.strip()
         if line:
-            logger.debug("[cloudflared] %s", line[:200])
+            logger.debug(f"[cloudflared] {line[:200]}")

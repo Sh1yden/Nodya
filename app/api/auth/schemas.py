@@ -1,13 +1,13 @@
-"""Схемы запросов/ответов аутентификации."""
+"""Request/response schemas for authentication."""
 
-import uuid
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
 
 class RegisterRequest(BaseModel):
-    """Создание аккаунта и первого токена."""
+    """Create an account and the first token."""
 
     username: str = Field(
         min_length=3,
@@ -19,7 +19,7 @@ class RegisterRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    """Получение нового токена по паролю."""
+    """Obtain a new token with username + password."""
 
     username: str = Field(min_length=3, max_length=20)
     password: str = Field(max_length=128)
@@ -27,10 +27,12 @@ class LoginRequest(BaseModel):
 
 
 class TokenResponse(BaseModel):
-    """Plaintext-токен отдаётся только один раз (ADR-3)."""
+    """Plaintext token returned exactly once (ADR-3)."""
 
     token: str
 
 
 class RegisterResponse(TokenResponse):
-    user_id: uuid.UUID
+    """Registration result: token plus the created user id."""
+
+    user_id: UUID
