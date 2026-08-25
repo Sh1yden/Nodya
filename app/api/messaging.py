@@ -13,13 +13,14 @@ from aio_pika.abc import (
 )
 from pydantic import BaseModel
 
-from app.common.broker import (
+from app.common import (
     DLX_EXCHANGE,
     ROUTING_INCOMING,
     ROUTING_OUTGOING,
+    IncomingMessage,
+    OutgoingMessage,
     declare_topology,
 )
-from app.common.schemas import IncomingMessage, OutgoingMessage
 from app.core import LoggerMixin
 
 

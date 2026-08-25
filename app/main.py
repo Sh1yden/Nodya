@@ -1,8 +1,7 @@
 """Точка входа Nodya: API Gateway + фоновые задачи в одном процессе.
 
-Поток среза C:
-Telegram -> POST /webhook/telegram -> RabbitMQ(incoming) -> Worker(эхо)
--> RabbitMQ(outgoing) -> TGSender -> Telegram.
+Поток: Telegram -> webhook (app.chats.telegram) -> RabbitMQ(incoming)
+-> Worker -> RabbitMQ(outgoing) -> TGSender -> Telegram.
 """
 
 import asyncio
@@ -11,25 +10,21 @@ from contextlib import asynccontextmanager, suppress
 from aiogram import Bot
 from fastapi import FastAPI
 
-from app.api.auth import router as auth_router
-from app.api.health import (
+from app.api import (
+    MessagePublisher,
+    auth_router,
+    health_router,
     ping_postgres,
     ping_qdrant,
     ping_rabbitmq,
 )
-from app.api.health import (
-    router as health_router,
-)
-from app.api.messaging import MessagePublisher
 from app.api.tunnels import start_tunnel, stop_tunnel
-from app.api.webhook_tg import router as webhook_router
-from app.brain.llm_choice.gemini import GeminiProvider
-from app.brain.llm_choice.openrouter import OpenRouterProvider
-from app.brain.llm_choice.router import LLMRouter
-from app.brain.memory.long.database import AsyncSessionLocal, engine
-from app.brain.memory.short.redis import RedisClient
+from app.brain.llm_choice import GeminiProvider, LLMRouter, OpenRouterProvider
+from app.brain.memory.long import AsyncSessionLocal, engine
+from app.brain.memory.short import RedisClient
+from app.chats.telegram import TGSender
+from app.chats.telegram import router as telegram_webhook_router
 from app.core import get_logger, settings, setup_logging
-from app.senders.tg_sender import TGSender
 from app.worker import Worker
 
 setup_logging(level=settings.LOG_LEVEL)
@@ -153,4 +148,4 @@ async def _set_webhook(bot: Bot, base_url: str) -> None:
 app = FastAPI(title="Nodya", lifespan=lifespan)
 app.include_router(health_router)
 app.include_router(auth_router)
-app.include_router(webhook_router)
+app.include_router(telegram_webhook_router)

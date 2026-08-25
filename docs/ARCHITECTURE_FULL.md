@@ -57,42 +57,37 @@
 ```
 nodya/
 ├── app/                          # Nodya Core — деплоится на сервер
+│   ├── main.py                   # Точка входа: Gateway + фоновые задачи
 │   ├── core/                     # Config, logger
 │   │   ├── config.py             # Pydantic Settings (SettingsSchema)
 │   │   ├── logger.py             # get_logger(), LoggerMixin
 │   │   ├── logger_config.py      # setup_logging(), форматтеры
 │   │   └── __init__.py           # re-export
 │   │
-│   ├── api/                      # API Gateway (только incoming)
-│   │   ├── chats/                # Точки входа от каналов
-│   │   │   ├── tg/               # Telegram: POST /webhook
-│   │   │   ├── ds/               # Discord: interactions endpoint (после MVP)
-│   │   │   ├── browser/          # Browser: POST /api/send
-│   │   │   └── cli/              # CLI: POST /api/send (после MVP)
-│   │   ├── ws.py                 # WebSocketManager + WS endpoint /ws
+│   ├── chats/                    # Каналы: приём + доставка вместе
+│   │   └── telegram/             # webhook (POST /webhook/telegram) + TGSender
+│   │       # позже: browser/ (WS + sender), discord/, cli/
+│   │
+│   ├── api/                      # Gateway-обвязка
+│   │   ├── ws.py                 # WebSocketManager + WS endpoint /ws (Этап 6)
 │   │   ├── auth/                 # Регистрация, логин, токены
 │   │   ├── health.py             # GET /health
+│   │   ├── messaging.py          # MessagePublisher (RabbitMQ)
+│   │   ├── tunnels.py            # cloudflared quick-tunnel для dev
 │   │   └── deps.py               # FastAPI dependencies
 │   │
 │   ├── brain/                    # "Мозг" — используется Worker'ом
 │   │   ├── models/               # SQLAlchemy модели
 │   │   ├── repositories/         # Data access layer
-│   │   ├── sqlite_files/         # SQLite-файлы для dev/тестов (опционально)
-│   │   ├── memory/               # short (Redis), long (PG), vector (Qdrant), prompts
+│   │   ├── memory/               # short (Redis), long (PG), init/prompts, vector (Qdrant)
 │   │   ├── llm_choice/           # LLM providers + router
 │   │   ├── skills/               # Skill registry + sandbox
 │   │   └── migrations/           # Alembic
 │   │
-│   ├── worker.py                 # Worker — главный脑: consumer incoming_messages
-│   ├── senders/                  # Channel Senders — доставка ответов
-│   │   ├── base.py               # Abstract ChannelSender
-│   │   ├── tg_sender.py          # Telegram: aiogram Bot API
-│   │   ├── browser_sender.py     # Browser: WebSocketManager
-│   │   ├── ds_sender.py          # Discord: REST API (после MVP)
-│   │   └── cli_sender.py         # CLI: (после MVP)
-│   ├── common/                   # Shared types
-│   │   └── schemas.py            # IncomingMessage, OutgoingMessage, etc.
-│   └── main.py                   # Точка входа для FastAPI (только API Gateway)
+│   ├── common/                   # Общие DTO + топология брокера
+│   │   ├── schemas.py            # IncomingMessage, OutgoingMessage, etc.
+│   │   └── broker.py             # Имена exchange/queues + декларации
+│   └── worker.py                 # Worker — consumer incoming_messages
 │
 ├── agent/                        # Nodya Agent (опционально)
 │   ├── main.py

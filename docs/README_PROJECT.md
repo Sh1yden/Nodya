@@ -70,7 +70,7 @@ uv sync
 alembic upgrade head
 
 # Запуск (FastAPI + Worker в одном процессе)
-uvicorn main:app --reload
+uv run uvicorn app.main:app --reload
 ```
 
 ### 4. Запуск (Docker Compose)
@@ -87,12 +87,13 @@ docker-compose up -d
 
 ```
 ├── app/                    # Nodya Core — основной сервер
+│   ├── main.py             # Точка входа: Gateway + фоновые задачи
+│   ├── worker.py           # Главный обработчик сообщений
 │   ├── core/               # Конфиг, логгер
-│   ├── api/                # API Gateway (webhook, auth, health, tunnels)
-│   ├── brain/              # "Мозг": модели, репозитории, память, LLM, скиллы
-│   ├── common/             # Общие DTO и топология брокера
-│   ├── senders/            # Доставка ответов в каналы (tg_sender, ...)
-│   └── worker.py           # Главный обработчик сообщений
+│   ├── api/                # auth, health, messaging, туннели
+│   ├── chats/              # Каналы: telegram/ (webhook + sender)
+│   ├── brain/              # "Мозг": модели, память, LLM, скиллы
+│   └── common/             # Общие DTO и топология брокера
 ├── agent/                  # Nodya Agent (опционально) — host-level скиллы
 ├── shared/                 # Общие схемы для RPC Core ↔ Agent
 ├── docs/                   # Документация

@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
-from app.brain.memory.long.database import get_db
+from app.brain.memory.long import get_db
 from app.brain.models import AuthTokens, Users
 from app.brain.repositories import UsersRepo
 from app.brain.repositories.security import (

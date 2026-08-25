@@ -21,13 +21,13 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
 )
 
-from app.brain.memory.long.database import AsyncSessionLocal
+from app.brain.memory.long import AsyncSessionLocal
 from app.brain.repositories import UsersRepo
-from app.common.broker import (
+from app.common import (
+    OutgoingMessage,
     declare_outgoing_queue,
     declare_topology,
 )
-from app.common.schemas import OutgoingMessage
 from app.core import LoggerMixin
 
 _PREFETCH_COUNT = 20

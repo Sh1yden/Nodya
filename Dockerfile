@@ -21,4 +21,4 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 EXPOSE 8014
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8014"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8014"]

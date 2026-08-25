@@ -14,7 +14,7 @@ from fastapi import APIRouter, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from app.brain.memory.long.database import AsyncSessionLocal
+from app.brain.memory.long import AsyncSessionLocal
 from app.core import get_logger, settings
 
 logger = get_logger(__name__)

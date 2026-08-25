@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from aiogram.types import Update
 from fastapi import APIRouter, HTTPException, Request, status
 
-from app.common.schemas import IncomingMessage
+from app.common import IncomingMessage
 from app.core import get_logger, settings
 
 logger = get_logger(__name__)

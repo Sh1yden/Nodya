@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   GEMINI_API_KEY: dummy
@@ -48,18 +53,17 @@ jobs:
           uv run python -c "
           import app.brain.models
           import app.brain.repositories
-          import app.brain.memory.short.redis
+          import app.brain.llm_choice
+          import app.brain.memory.init.prompts
+          import app.brain.memory.short
+          import app.brain.memory.long
           import app.api.auth
           import app.api.deps
-          import app.common.broker
-          import app.common.schemas
-          import app.api.health
-          import app.api.messaging
-          import app.api.tunnels
-          import app.api.webhook_tg
-          import app.senders.tg_sender
+          import app.chats.telegram
+          import app.common
           import app.core
           import app.worker
+          import app.main
           print('All core packages import cleanly')
           "
 
@@ -113,6 +117,30 @@ jobs:
 
       - name: Check models match migrations
         run: uv run alembic check
+
+  # Сборка образа без публикации в реестр: ловит поломки Dockerfile
+  # и зависимостей до деплоя (кейс hatch-vcs без .git уже был).
+  # Пуш в GHCR добавим отдельной работой, когда решим про реестр.
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: [lint-and-smoke]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: nodya:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   # Появится, когда напишешь тесты по Этапу 9 из TODO_MASTER.md —
   # тот же паттерн service-контейнеров, что и в job "migrations".

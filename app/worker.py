@@ -30,20 +30,17 @@ from aio_pika.abc import (
 from sqlalchemy.exc import IntegrityError
 
 from app.api.messaging import MessagePublisher
-from app.brain.llm_choice.base import ChatMessage
-from app.brain.llm_choice.router import LLMRouter
-from app.brain.memory.short.redis import ContextMessage, RedisClient
+from app.brain import load_system_prompt
+from app.brain.llm_choice import ChatMessage, LLMRouter
+from app.brain.memory.short import ContextMessage, RedisClient
 from app.brain.models import Messages, Users
-from app.brain.prompts import load_system_prompt
 from app.brain.repositories import UsersRepo
-from app.common.broker import (
-    declare_incoming_queue,
-    declare_topology,
-)
-from app.common.schemas import (
+from app.common import (
     IncomingMessage,
     OutgoingMessage,
     ScheduledEnvelope,
+    declare_incoming_queue,
+    declare_topology,
 )
 from app.core import LoggerMixin, settings
 

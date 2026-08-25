@@ -35,9 +35,9 @@
 | 2026-08-24 | N | Интеграция с named-tunnel инфраструктурой: ingress nodya.shayden.ru → nodya_heart:8014 в BridgeNode/config.yml; internet_bridge возвращён в compose (конвенция инфраструктуры — ошибка части B признана); Dockerfile --no-install-project (hatch-vcs без .git); полный стек в контейнерах, health 200 через https://nodya.shayden.ru. Quick-tunnel оставлен как zero-config fallback |
 | 2026-08-24 | D2 | Память ожила: push_context_many (пайплайн), state-машина thinking/idle с TTL, proactive_decision-заглушка («now»), get_db/repo-типы. Верифицировано: пачка n=3 одним батчем, 6 записей контекста TTL 24ч, state=idle |
 | 2026-08-24 | D3 | LLM-слой по матрице tldr: D = gemini-3.5-flash-lite → 3.1-flash-lite → OR nemotron ultra/super:free (CS=3.6-flash и BP=gemma/nemotron прописаны, подключаются в Этапе 7); VS=gemini-embedding-2 без OR-fallback (embeddings у OpenRouter нет). Провайдеры gemini/openrouter + роутер с transient/fatal-разделением и backoff. Worker: системный промпт (дефолт ME/RULES + переопределение файлами) + история Redis → один ответ на пачку. Fail-fast ключей возвращён. Живо проверено: ответ Gemini + кросс-провайдерный fallback на nemotron |
+| 2026-08-25 | R1 | Рефакторинг структуры: app/chats/<канал>/ объединяет webhook+sender (senders/ упразднён); prompts.py → brain/memory/init/ с cwd-независимым путём; main.py → app/main.py (+CMD Dockerfile); фасады __init__ во всех пакетах, внешние импорты только через корни; CI: +docker-build job (build-only, gha-cache), concurrency, workflow_dispatch |
 
-Следующий шаг: D4 — browser-канал (WS), consolidation, background parser + feed_sources, graceful shutdown полировка.
-
+Следующий шаг: D4 — по выбору: долгосрочная память (consolidation+Qdrant) / проактивность (70/20/10, RSS) / browser-канал.
 ---
 
 ## **Этап 0: - [x] Фикс того, что уже написано**

@@ -7,7 +7,7 @@ from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.brain.memory.long.database import get_db
+from app.brain.memory.long import get_db
 from app.brain.models import AuthTokens, Users
 from app.brain.repositories.security import hash_token
 

@@ -1,6 +1,6 @@
 """Системный промпт Ноди.
 
-Приоритет: файлы app/brain/memory/init/prompts/ME.md и RULES.md
+Приоритет: файлы prompts/ME.md и prompts/RULES.md рядом с этим модулем
 (пишутся владельцем) -> встроенные дефолты + WARNING. Файлы читаются
 при каждом вызове — правки подхватываются без рестарта.
 """
@@ -11,7 +11,7 @@ from app.core import get_logger
 
 logger = get_logger(__name__)
 
-PROMPTS_DIR = Path("app/brain/memory/init/prompts")
+PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
 _DEFAULT_ME = (
     "Ты — Нодя, личная ИИ-помощница своего владельца. "
