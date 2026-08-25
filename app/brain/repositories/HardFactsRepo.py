@@ -1,4 +1,4 @@
-from typing import Any
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,18 +12,16 @@ class HardFactsRepo(BaseRepo[HardFacts]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, HardFacts)
 
-    async def get_facts_by_uuid(self, user_id: Any) -> list | None:
-        """Get all facts connect to user. By user id."""
-
+    async def get_facts_by_uuid(self, user_id: UUID) -> list[HardFacts]:
+        """Все факты пользователя по его user_id."""
         stmt = select(self.model).where(self.model.user_id == user_id)
         result = await self.session.scalars(stmt)
-
         return list(result.all())
 
     async def search_last_updated(
-        self, user_id: Any, limit: int = 20
+        self, user_id: UUID, limit: int = 20
     ) -> list[HardFacts]:
-        """Return the most recently updated facts for a given user."""
+        """Самые свежие факты пользователя."""
         stmt = (
             select(self.model)
             .where(self.model.user_id == user_id)
@@ -31,5 +29,4 @@ class HardFactsRepo(BaseRepo[HardFacts]):
             .limit(limit)
         )
         result = await self.session.scalars(stmt)
-
         return list(result.all())

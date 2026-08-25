@@ -178,9 +178,22 @@ class RedisClient:
         self, user_id: UUID, message: ContextMessage
     ) -> None:
         """Добавить сообщение в историю, обрезать до лимита, обновить TTL."""
+        await self.push_context_many(user_id, [message])
+
+    async def push_context_many(
+        self, user_id: UUID, messages: list[ContextMessage]
+    ) -> None:
+        """Добавить пачку сообщений одним пайплайном.
+
+        RPUSH всех элементов + один LTRIM до лимита + один EXPIRE:
+        N сообщений диалога = одна сетевая транзакция, а не N.
+        """
+        if not messages:
+            return
         key = _context_key(user_id)
         async with self._redis.pipeline(transaction=True) as pipe:
-            pipe.rpush(key, message.model_dump_json())
+            for message in messages:
+                pipe.rpush(key, message.model_dump_json())
             pipe.ltrim(key, -_CONTEXT_MAX_LEN, -1)
             pipe.expire(key, _CONTEXT_TTL_SECONDS)
             await pipe.execute()

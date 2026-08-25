@@ -33,8 +33,10 @@
 | 2026-08-24 | D1 | Модель Messages (+миграция eda380bd303f), sha256-токены (ADR-3), /auth/register + /auth/login с ролями owner (проверено curl: 201/409/401/200), deps.get_current_user, архивация пачек в messages из Worker (degraded при сбое). Найдено и исправлено: дрейф схемы старой БД (пересоздан volume postgres), отсутствие relationship Users↔AuthTokens ломало порядок INSERT |
 | 2026-08-24 | H | Tuna удалена (RU-сегмент); drain stdout cloudflared (фикс зависания туннеля); drop_pending_updates=False на set_webhook (офлайн-сообщения доставляются); подробные логи webhook/worker/sender; FK ON DELETE CASCADE (миграция abbdbc96f127) + DELETE /auth/me (204/401 проверено curl) |
 | 2026-08-24 | N | Интеграция с named-tunnel инфраструктурой: ingress nodya.shayden.ru → nodya_heart:8014 в BridgeNode/config.yml; internet_bridge возвращён в compose (конвенция инфраструктуры — ошибка части B признана); Dockerfile --no-install-project (hatch-vcs без .git); полный стек в контейнерах, health 200 через https://nodya.shayden.ru. Quick-tunnel оставлен как zero-config fallback |
+| 2026-08-24 | D2 | Память ожила: push_context_many (пайплайн), state-машина thinking/idle с TTL, proactive_decision-заглушка («now»), get_db/repo-типы. Верифицировано: пачка n=3 одним батчем, 6 записей контекста TTL 24ч, state=idle |
+| 2026-08-24 | D3 | LLM-слой по матрице tldr: D = gemini-3.5-flash-lite → 3.1-flash-lite → OR nemotron ultra/super:free (CS=3.6-flash и BP=gemma/nemotron прописаны, подключаются в Этапе 7); VS=gemini-embedding-2 без OR-fallback (embeddings у OpenRouter нет). Провайдеры gemini/openrouter + роутер с transient/fatal-разделением и backoff. Worker: системный промпт (дефолт ME/RULES + переопределение файлами) + история Redis → один ответ на пачку. Fail-fast ключей возвращён. Живо проверено: ответ Gemini + кросс-провайдерный fallback на nemotron |
 
-Следующий шаг: D2 — Context Assembly (Redis context в Worker, заглушка proactive_decision, APScheduler-перенос nodya:scheduled).
+Следующий шаг: D4 — browser-канал (WS), consolidation, background parser + feed_sources, graceful shutdown полировка.
 
 ---
 

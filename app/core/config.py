@@ -50,10 +50,28 @@ class SettingsSchema(BaseSettings):
     QDRANT_HOST: str = Field(default="localhost")
     QDRANT_PORT: int = Field(default=6333)
 
-    # AI API'S (строгая проверка появится в Этапе 5 при инициализации
-    # провайдеров; до этого пустые значения допустимы)
+    # AI API'S (строгая проверка при инициализации провайдеров в main)
     GEMINI_API_KEY: str = Field(default="")
     OPENROUTER_API_KEY: str = Field(default="")
+
+    # LLM-роли (матрица из tldr: D/CS/BP/VS).
+    # Цепочки — порядок кандидатов через запятую; после Gemini-части
+    # роутер добавляет OpenRouter-fallback (nemotron пара).
+    LLM_DIALOGUE_GEMINI: str = Field(
+        default="gemini-3.5-flash-lite,gemini-3.1-flash-lite"
+    )
+    LLM_CS_GEMINI: str = Field(default="gemini-3.6-flash")
+    LLM_BP_OPENROUTER: str = Field(
+        default=("google/gemma-4-31b-it:free,google/gemma-4-26b-a4b-it:free")
+    )
+    LLM_FALLBACK_OPENROUTER: str = Field(
+        default=(
+            "nvidia/nemotron-3-ultra-550b-a55b:free,"
+            "nvidia/nemotron-3-super-120b-a12b:free"
+        )
+    )
+    LLM_EMBED_MODEL: str = Field(default="gemini-embedding-2")
+    LLM_HISTORY_LIMIT: int = Field(default=20)
 
     # Chats tokens
     # Telegram

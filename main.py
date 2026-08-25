@@ -23,6 +23,9 @@ from app.api.health import (
 from app.api.messaging import MessagePublisher
 from app.api.tunnels import start_tunnel, stop_tunnel
 from app.api.webhook_tg import router as webhook_router
+from app.brain.llm_choice.gemini import GeminiProvider
+from app.brain.llm_choice.openrouter import OpenRouterProvider
+from app.brain.llm_choice.router import LLMRouter
 from app.brain.memory.long.database import AsyncSessionLocal, engine
 from app.brain.memory.short.redis import RedisClient
 from app.core import get_logger, settings, setup_logging
@@ -37,7 +40,10 @@ _lg = get_logger(__name__)
 async def lifespan(app: FastAPI):
     """Bootstrap (fail-fast) и graceful shutdown всех подсистем."""
     await _fail_fast()
-
+    router = LLMRouter(
+        gemini=GeminiProvider(settings.GEMINI_API_KEY),
+        openrouter=OpenRouterProvider(settings.OPENROUTER_API_KEY),
+    )
     publisher = MessagePublisher(settings.rabbitmq_url)
     await publisher.connect()
     redis_client = RedisClient(settings.redis_url)
@@ -47,6 +53,7 @@ async def lifespan(app: FastAPI):
         redis_client=redis_client,
         session_factory=AsyncSessionLocal,
         publisher=publisher,
+        router=router,
     )
     sender = TGSender(
         broker_url=settings.rabbitmq_url,
@@ -87,6 +94,7 @@ async def lifespan(app: FastAPI):
             await bot.delete_webhook(drop_pending_updates=False)
     await bot.session.close()
     await publisher.close()
+    await router.close()
     await redis_client.close()
     await engine.dispose()
     if tunnel_process is not None:
@@ -94,9 +102,13 @@ async def lifespan(app: FastAPI):
 
 
 async def _fail_fast() -> None:
-    """Упасть при старте, если какая-то зависимость недоступна."""
+    """Упасть при старте, если зависимость или ключ недоступны."""
     if not settings.TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN пуст.")
+    if not settings.GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY пуст (aistudio.google.com).")
+    if not settings.OPENROUTER_API_KEY:
+        raise RuntimeError("OPENROUTER_API_KEY пуст (openrouter.ai).")
     redis_probe = RedisClient(settings.redis_url)
     try:
         checks = {

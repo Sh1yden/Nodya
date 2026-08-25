@@ -17,6 +17,7 @@ import asyncio
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import aio_pika
@@ -29,8 +30,11 @@ from aio_pika.abc import (
 from sqlalchemy.exc import IntegrityError
 
 from app.api.messaging import MessagePublisher
-from app.brain.memory.short.redis import RedisClient
+from app.brain.llm_choice.base import ChatMessage
+from app.brain.llm_choice.router import LLMRouter
+from app.brain.memory.short.redis import ContextMessage, RedisClient
 from app.brain.models import Messages, Users
+from app.brain.prompts import load_system_prompt
 from app.brain.repositories import UsersRepo
 from app.common.broker import (
     declare_incoming_queue,
@@ -44,6 +48,7 @@ from app.common.schemas import (
 from app.core import LoggerMixin, settings
 
 _PREFETCH_COUNT = 50
+_THINKING_TTL_SECONDS = 300
 
 
 @dataclass(slots=True)
@@ -63,11 +68,13 @@ class Worker(LoggerMixin):
         redis_client: RedisClient,
         session_factory: type,
         publisher: MessagePublisher,
+        router: LLMRouter,
     ) -> None:
         self._url = broker_url
         self._redis = redis_client
         self._session_factory = session_factory
         self._publisher = publisher
+        self._router = router
         self._connection: AbstractRobustConnection | None = None
         self._channel: AbstractRobustChannel | None = None
         self._queue: AbstractRobustQueue | None = None
@@ -171,7 +178,7 @@ class Worker(LoggerMixin):
             await self._defer_incoming(dtos, amqp_messages, retry=0)
             return
         try:
-            await self._handle_dtos(user.user_id, dtos)
+            await self._run_locked(user.user_id, dtos)
         finally:
             await self._redis.release_lock(user.user_id, lock_token)
         self._lg.info(
@@ -182,20 +189,91 @@ class Worker(LoggerMixin):
         for amqp_message in amqp_messages:
             await amqp_message.ack()
 
+    async def _run_locked(
+        self, user_id: UUID, dtos: list[IncomingMessage]
+    ) -> list[OutgoingMessage]:
+        """Обработка под взятым локом: state, решение, контекст.
+
+        thinking ставится с TTL — при крэше воркера статус не зависнет
+        навсегда, а отпустится сам через _THINKING_TTL_SECONDS.
+        """
+        decision = self._proactive_decision()
+        if decision != "now":
+            self._lg.info(
+                "Proactive decision=%s для user_id=%s — ветка появится "
+                "вместе с LLM (D3/D6).",
+                decision,
+                user_id,
+            )
+        await self._redis.set_state(
+            user_id, "thinking", ttl=_THINKING_TTL_SECONDS
+        )
+        outgoing = await self._handle_dtos(user_id, dtos)
+        await self._save_dialog_context(user_id, dtos, outgoing)
+        await self._redis.set_state(user_id, "idle")
+        return outgoing
+
+    def _proactive_decision(self) -> str:
+        """Заглушка Этапа 4: пока всегда немедленный ответ.
+
+        Рандом 70% now / 20% delay / 10% skip подключается вместе
+        с LLM-слоем (D3) и проактивностью (Этап 7).
+        """
+        return "now"
+
+    async def _save_dialog_context(
+        self,
+        user_id: UUID,
+        incoming: list[IncomingMessage],
+        outgoing: list[OutgoingMessage],
+    ) -> None:
+        """История диалога в Redis (ADR-10): user + assistant парами."""
+        now = datetime.now(UTC)
+        context: list[ContextMessage] = [
+            ContextMessage(role="user", content=d.text, timestamp=now)
+            for d in incoming
+        ]
+        context += [
+            ContextMessage(role="assistant", content=o.text, timestamp=now)
+            for o in outgoing
+        ]
+        try:
+            await self._redis.push_context_many(user_id, context)
+        except Exception:
+            self._lg.exception(
+                "Контекст диалога не записан: user_id=%s.", user_id
+            )
+
     async def _handle_dtos(
         self, user_id: UUID, dtos: list[IncomingMessage]
-    ) -> None:
-        """Срез C: эхо вместо LLM (LLM подключается в Этапе 5)."""
-        outgoing: list[OutgoingMessage] = []
-        for dto in dtos:
-            message = OutgoingMessage(
-                user_id=user_id,
-                channel=dto.channel,
-                text=dto.text,
+    ) -> list[OutgoingMessage]:
+        """Один ответ Ноди на всю пачку (суть debounce, ADR-12)."""
+        history = await self._redis.get_context(
+            user_id, limit=settings.LLM_HISTORY_LIMIT
+        )
+        chat: list[ChatMessage] = [
+            ChatMessage(role="system", content=load_system_prompt())
+        ]
+        chat += [ChatMessage(role=m.role, content=m.content) for m in history]
+        chat.append(
+            ChatMessage(
+                role="user",
+                content="\n".join(d.text for d in dtos),
             )
-            await self._publisher.publish_outgoing(message)
-            outgoing.append(message)
-        await self._archive_batch(user_id, incoming=dtos, outgoing=outgoing)
+        )
+        response = await self._router.generate_with_fallback("dialogue", chat)
+        reply_text = response.text or (
+            "Что-то я задумалась и потеряла мысль. Повтори?"
+        )
+
+        outgoing = OutgoingMessage(
+            user_id=user_id,
+            channel=dtos[0].channel,
+            text=reply_text,
+        )
+        await self._publisher.publish_outgoing(outgoing)
+        await self._archive_batch(user_id, incoming=dtos, outgoing=[outgoing])
+        return [outgoing]
 
     async def _archive_batch(
         self,
@@ -330,6 +408,6 @@ class Worker(LoggerMixin):
             )
             return
         try:
-            await self._handle_dtos(user.user_id, dtos)
+            await self._run_locked(user.user_id, dtos)
         finally:
             await self._redis.release_lock(user.user_id, lock_token)
