@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    UniqueConstraint,
     Uuid,
     func,
 )
@@ -23,6 +24,12 @@ class HardFacts(Base):
     """A durable fact extracted from dialogues (consolidation)."""
 
     __tablename__ = "hard_facts"
+    __table_args__ = (
+        # Enables atomic ON CONFLICT upsert; one fact per identity.
+        UniqueConstraint(
+            "user_id", "category", "key", name="uq_hard_facts_identity"
+        ),
+    )
 
     fact_id: Mapped[int] = mapped_column(
         Integer, primary_key=True, autoincrement=True

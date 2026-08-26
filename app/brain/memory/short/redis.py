@@ -7,6 +7,7 @@ through RedisClient.
 Path in the project: app/brain/memory/short/redis.py
 """
 
+import secrets
 from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID, uuid4
@@ -24,6 +25,9 @@ _LOCK_PREFIX = "nodya:lock"
 _DEBOUNCE_PREFIX = "nodya:debounce"
 _AGENT_ONLINE_PREFIX = "nodya:agent_online"
 _SCHEDULED_KEY = "nodya:scheduled"
+_LINK_PREFIX = "nodya:link"
+LINK_TTL_SECONDS = 600
+_LINK_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 _CONTEXT_MAX_LEN = 100
 _CONTEXT_TTL_SECONDS = 24 * 60 * 60
@@ -85,9 +89,14 @@ class DialogueState(BaseModel):
 
 
 class ContextMessage(BaseModel):
-    """A single entry of the short-term dialogue history."""
+    """A single entry of the short-term dialogue history.
 
-    role: Literal["user", "assistant"]
+    role "summary" holds the compressed memory of earlier
+    conversations produced by Consolidation; it survives context
+    replacement and is rendered as a system block in prompts.
+    """
+
+    role: Literal["user", "assistant", "summary"]
     content: str
     timestamp: datetime
 
@@ -115,6 +124,71 @@ class RedisClient:
     async def close(self) -> None:
         """Close the connection pool; call on graceful shutdown."""
         await self._redis.aclose()
+
+    # --- Telegram pairing codes (L1) ---
+
+    async def issue_link_code(self, user_id: UUID) -> str:
+        """Issue a one-time Telegram pairing code for a user.
+
+        A new code invalidates the previous pending one of the same
+        user; the code lives LINK_TTL_SECONDS and is consumed by
+        consume_link_code exactly once (GETDEL).
+
+        Args:
+            user_id: Account that will receive the telegram binding.
+
+        Returns:
+            8-character code from an unambiguous alphabet.
+        """
+        pending_key = f"{_LINK_PREFIX}:user:{user_id}"
+        previous = await self._redis.get(pending_key)
+        if previous:
+            await self._redis.delete(f"{_LINK_PREFIX}:{previous}")
+        code = "".join(secrets.choice(_LINK_ALPHABET) for _ in range(8))
+        async with self._redis.pipeline(transaction=True) as pipe:
+            pipe.set(
+                f"{_LINK_PREFIX}:{code}", str(user_id), ex=LINK_TTL_SECONDS
+            )
+            pipe.set(pending_key, code, ex=LINK_TTL_SECONDS)
+            await pipe.execute()
+        return code
+
+    async def consume_link_code(self, code: str) -> UUID | None:
+        """Consume a pairing code atomically (one-time use).
+
+        Args:
+            code: Code supplied by the user in Telegram.
+
+        Returns:
+            Bound account UUID, or None when unknown/expired.
+        """
+        raw = await self._redis.getdel(
+            f"{_LINK_PREFIX}:{code.strip().upper()}"
+        )
+        return UUID(raw) if raw else None
+
+    async def rename_user_keys(
+        self, old_user_id: UUID, new_user_id: UUID
+    ) -> None:
+        """Move short-term memory keys after an account merge.
+
+        Context and state are RENAMEd onto the surviving account;
+        transient lock/debounce keys of the removed identity are
+        simply dropped.
+
+        Args:
+            old_user_id: Identity being absorbed.
+            new_user_id: Surviving identity.
+        """
+        for old_key, new_key in (
+            (_context_key(old_user_id), _context_key(new_user_id)),
+            (_state_key(old_user_id), _state_key(new_user_id)),
+        ):
+            if await self._redis.exists(old_key):
+                await self._redis.rename(old_key, new_key)
+        await self._redis.delete(
+            _lock_key(old_user_id), _debounce_key(old_user_id)
+        )
 
     async def ping(self) -> bool:
         """Check Redis availability for health/fail-fast probes.
@@ -268,13 +342,45 @@ class RedisClient:
                 logger.warning(f"Damaged context record: user={user_id}.")
         return messages
 
+    async def replace_context(
+        self, user_id: UUID, messages: list[ContextMessage]
+    ) -> None:
+        """Atomically swap the whole history (Consolidation sleep).
+
+        DELETE + RPUSH + EXPIRE run in one transaction: a concurrent
+        reader sees either the old history or the compressed one,
+        never an empty gap.
+
+        Args:
+            user_id: Internal user UUID.
+            messages: New history entries (typically one summary).
+        """
+        key = _context_key(user_id)
+        async with self._redis.pipeline(transaction=True) as pipe:
+            pipe.delete(key)
+            for message in messages:
+                pipe.rpush(key, message.model_dump_json())
+            pipe.expire(key, _CONTEXT_TTL_SECONDS)
+            await pipe.execute()
+
     async def clear_context(self, user_id: UUID) -> None:
-        """Drop the whole dialogue history (used by Consolidation).
+        """Drop the whole dialogue history.
 
         Args:
             user_id: Internal user UUID.
         """
         await self._redis.delete(_context_key(user_id))
+
+    async def context_length(self, user_id: UUID) -> int:
+        """Current number of entries in the dialogue history.
+
+        Args:
+            user_id: Internal user UUID.
+
+        Returns:
+            LLEN of the context list.
+        """
+        return int(await self._redis.llen(_context_key(user_id)))
 
     # --- Lock ---
 

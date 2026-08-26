@@ -51,6 +51,18 @@ class SettingsSchema(BaseSettings):
     # Qdrant
     QDRANT_HOST: str = Field(default="localhost")
     QDRANT_PORT: int = Field(default=6333)
+    QDRANT_COLLECTION: str = Field(default="nodya_memory")
+
+    # Consolidation (sleep phase, stage 7.2 + D4 amendment)
+    CONSOLIDATION_SCAN_MINUTES: int = Field(default=30)
+    CONSOLIDATION_IDLE_MINUTES: int = Field(
+        default=180,
+        description="Silence required before a user is consolidated.",
+    )
+    CONSOLIDATION_MIN_MESSAGES: int = Field(default=8)
+    FACTS_IN_PROMPT_LIMIT: int = Field(default=20)
+    VECTOR_SEARCH_LIMIT: int = Field(default=5)
+    FACTS_MIN_CONFIDENCE: float = Field(default=0.4)
 
     # AI APIs (validated strictly at provider init in main)
     GEMINI_API_KEY: str = Field(default="")

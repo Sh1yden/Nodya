@@ -232,11 +232,14 @@ sequenceDiagram
     
     APS->>PG: bulk upsert HardFacts (по (user_id, category, key))
     
-    APS->>LLM: generate_embeddings(context_blocks)
+    APS->>LLM: compress(context) — компактное саммари диалога
+    LLM-->>APS: summary
+    APS->>LLM: generate_embeddings(facts)
     LLM-->>APS: list[vector_embeddings]
     APS->>QD: upsert_points(vectors)
     
-    APS->>R: clear_context(user_id)
+    note over APS,R: D4-амendment: атомарная замена — саммари приходит<br/>на смену сырому контексту, память остаётся живой
+    APS->>R: replace_context(summary)
     APS->>R: set_state(user_id, idle)
 ```
 

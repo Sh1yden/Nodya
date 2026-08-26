@@ -9,12 +9,20 @@ from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.brain.memory.long import get_db
+from app.brain.memory.short import LINK_TTL_SECONDS, RedisClient
 from app.brain.models import AuthTokens, Users
 from app.brain.repositories import UsersRepo
 from app.brain.repositories.security import (
@@ -26,6 +34,7 @@ from app.brain.repositories.security import (
 from app.core import get_logger, settings
 
 from .schemas import (
+    LinkCodeResponse,
     LoginRequest,
     RegisterRequest,
     RegisterResponse,
@@ -114,6 +123,30 @@ async def login(
     session.add(token_row)
     await session.commit()
     return TokenResponse(token=raw_token)
+
+
+@router.post("/telegram/code", response_model=LinkCodeResponse)
+async def create_telegram_link_code(
+    current_user: _CurrentUserDep,
+    request: Request,
+) -> LinkCodeResponse:
+    """Issue a one-time code to pair a Telegram account.
+
+    The account making the call must already be authenticated; the
+    code is then consumed by sending `/link <code>` to the bot from
+    the Telegram account being linked.
+
+    Args:
+        current_user: Authenticated user requesting the pairing.
+        request: Incoming request (provides app.state.redis).
+
+    Returns:
+        The pairing code and its lifetime in seconds.
+    """
+    redis_client: RedisClient = request.app.state.redis
+    code = await redis_client.issue_link_code(current_user.user_id)
+    logger.info(f"Pairing code issued for user_id={current_user.user_id}.")
+    return LinkCodeResponse(code=code, expires_in=LINK_TTL_SECONDS)
 
 
 @router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)

@@ -15,6 +15,7 @@ processing every SCHEDULED_POLL_SECONDS (ADR-13).
 """
 
 import asyncio
+import re
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -28,14 +29,17 @@ from aio_pika.abc import (
     AbstractRobustConnection,
     AbstractRobustQueue,
 )
+from sqlalchemy import delete as sa_delete
+from sqlalchemy import update as sa_update
 from sqlalchemy.exc import IntegrityError
 
 from app.api.messaging import MessagePublisher
 from app.brain import load_system_prompt
 from app.brain.llm_choice import ChatMessage, LLMRouter
 from app.brain.memory.short import ContextMessage, RedisClient
-from app.brain.models import Messages, Users
-from app.brain.repositories import UsersRepo
+from app.brain.memory.vector import VectorMemory
+from app.brain.models import HardFacts, Messages, Users
+from app.brain.repositories import HardFactsRepo, UsersRepo
 from app.common import (
     IncomingMessage,
     OutgoingMessage,
@@ -47,6 +51,9 @@ from app.core import LoggerMixin, settings
 
 _PREFETCH_COUNT = 50
 _THINKING_TTL_SECONDS = 300
+_LINK_COMMAND_PATTERN = re.compile(
+    r"^/(?:link|start)\s+([A-Za-z0-9]{6,12})$", re.IGNORECASE
+)
 _HISTORY_LIMIT_FALLBACK = 20
 
 
@@ -68,6 +75,7 @@ class Worker(LoggerMixin):
         session_factory: type,
         publisher: MessagePublisher,
         router: LLMRouter,
+        vectors: VectorMemory,
     ) -> None:
         """Store collaborators; no I/O happens here.
 
@@ -77,12 +85,14 @@ class Worker(LoggerMixin):
             session_factory: Async session factory for DB access.
             publisher: Outgoing publisher into RabbitMQ.
             router: LLM router used for dialogue generation.
+            vectors: Qdrant-backed long-term fact memory.
         """
         self._url = broker_url
         self._redis = redis_client
         self._session_factory = session_factory
         self._publisher = publisher
         self._router = router
+        self._vectors = vectors
         self._connection: AbstractRobustConnection | None = None
         self._channel: AbstractRobustChannel | None = None
         self._queue: AbstractRobustQueue | None = None
@@ -140,6 +150,8 @@ class Worker(LoggerMixin):
             f"Message received: user={key} channel={dto.channel} "
             f"len={len(dto.text)}"
         )
+        if await self._try_command(dto, message):
+            return
         batch = self._buffers.get(key)
         if batch is None:
             batch = _PendingBatch()
@@ -150,6 +162,168 @@ class Worker(LoggerMixin):
             )
         batch.amqp_messages.append(message)
         batch.dtos.append(dto)
+
+    async def _try_command(
+        self,
+        dto: IncomingMessage,
+        message: AbstractIncomingMessage,
+    ) -> bool:
+        """Intercept pairing commands before the dialogue machinery.
+
+        Commands bypass debounce/state/LLM/archive completely: they
+        are acknowledged immediately after handling so the memory of
+        the conversation stays clean.
+
+        Args:
+            dto: Parsed incoming message.
+            message: Raw AMQP delivery to acknowledge.
+
+        Returns:
+            True when the message was a handled command.
+        """
+        match = _LINK_COMMAND_PATTERN.match(dto.text.strip())
+        if not match:
+            return False
+        try:
+            await self._handle_link(dto, message, match.group(1))
+        except Exception as exc:
+            self._lg.error(f"/link handling failed: {exc}")
+            await self._ack_with_reply(
+                dto, message, "Не смог связать аккаунт — попробуй позже."
+            )
+        return True
+
+    async def _handle_link(
+        self,
+        dto: IncomingMessage,
+        message: AbstractIncomingMessage,
+        code: str,
+    ) -> None:
+        """Pair a Telegram account with an authenticated one (L1).
+
+        Consumes the one-time code, binds telegram_id onto the target
+        account and, when an auto-registered duplicate already holds
+        this telegram id, migrates its memory (messages, facts,
+        Redis keys, Qdrant labels) before removing it.
+
+        Args:
+            dto: The /link message itself.
+            message: Raw AMQP delivery to acknowledge.
+            code: Pairing code extracted from the text.
+        """
+        target_id = await self._redis.consume_link_code(code)
+        if target_id is None:
+            self._lg.warning("Link rejected: unknown or expired code.")
+            await self._ack_with_reply(
+                dto, message, "Код недействителен или истёк."
+            )
+            return
+
+        telegram_id = int(dto.user_external_id)
+        async with self._session_factory() as session:
+            repo = UsersRepo(session)
+            target = await repo.get_by_id(target_id)
+            if target is None:
+                await self._ack_with_reply(
+                    dto,
+                    message,
+                    "Аккаунт из кода не найден — зарегистрируйся заново.",
+                )
+                return
+            duplicate = await repo.get_by_field("telegram_id", telegram_id)
+
+            if duplicate is not None and duplicate.user_id == target.user_id:
+                await self._ack_with_reply(
+                    dto, message, "Этот Telegram уже привязан к аккаунту."
+                )
+                return
+            if (
+                target.telegram_id is not None
+                and target.telegram_id != telegram_id
+            ):
+                await self._ack_with_reply(
+                    dto,
+                    message,
+                    "К этому аккаунту уже привязан другой Telegram.",
+                )
+                return
+
+            merged = duplicate is not None and (
+                duplicate.user_id != target.user_id
+            )
+            if merged:
+                assert duplicate is not None
+                old_user_id = duplicate.user_id
+                # Core statements in explicit order: unique(telegram_id)
+                # must be freed on the duplicate BEFORE the target takes it.
+                for stmt in (
+                    sa_update(Messages)
+                    .where(Messages.user_id == old_user_id)
+                    .values(user_id=target.user_id),
+                    sa_update(HardFacts)
+                    .where(HardFacts.user_id == old_user_id)
+                    .values(user_id=target.user_id),
+                    sa_update(Users)
+                    .where(Users.user_id == old_user_id)
+                    .values(telegram_id=None),
+                    sa_delete(Users).where(Users.user_id == old_user_id),
+                    sa_update(Users)
+                    .where(Users.user_id == target.user_id)
+                    .values(telegram_id=telegram_id),
+                ):
+                    await session.execute(stmt)
+            else:
+                target.telegram_id = telegram_id
+            await session.commit()
+
+        # Post-commit side effects run independently: a failure in
+        # one storage must not hide the success of the other, and the
+        # user gets an honest report about partial transfer.
+        issues: list[str] = []
+        if merged:
+            try:
+                await self._redis.rename_user_keys(old_user_id, target.user_id)
+            except Exception as exc:
+                issues.append(f"Redis keys: {exc}")
+            try:
+                await self._vectors.reassign_user(old_user_id, target.user_id)
+            except Exception as exc:
+                issues.append(f"Qdrant labels: {exc}")
+
+        reply = "Аккаунт связан ✓"
+        if merged:
+            reply += " Память перенесена сюда."
+        if issues:
+            reply += " Часть переноса не завершилась — сообщи владельцу."
+            self._lg.error(f"Link post-merge issues: {issues}")
+        self._lg.info(
+            f"Telegram linked: tg={telegram_id} -> "
+            f"user_id={target.user_id} (merged={merged})."
+        )
+        await self._ack_with_reply(dto, message, reply)
+
+    async def _ack_with_reply(
+        self,
+        dto: IncomingMessage,
+        message: AbstractIncomingMessage,
+        text: str,
+    ) -> None:
+        """Publish a direct chat reply and acknowledge the delivery.
+
+        Args:
+            dto: Source command message (provides the channel).
+            message: Raw AMQP delivery to acknowledge.
+            text: Human-facing reply text.
+        """
+        local_user = await self._resolve_user("telegram", dto.user_external_id)
+        await self._publisher.publish_outgoing(
+            OutgoingMessage(
+                user_id=local_user.user_id,
+                channel=dto.channel,
+                text=text,
+            )
+        )
+        await message.ack()
 
     async def _flush_after_debounce(self, key: str) -> None:
         """Wait out the silence window, then process the batch.
@@ -290,13 +464,30 @@ class Worker(LoggerMixin):
         """
         limit = settings.LLM_HISTORY_LIMIT or _HISTORY_LIMIT_FALLBACK
         history = await self._redis.get_context(user_id, limit=limit)
+        batch_text = "\n".join(d.text for d in dtos)
+
+        system_base = load_system_prompt()
+        memory_block = await self._long_term_block(user_id, batch_text)
+        if memory_block:
+            system_base = f"{system_base}\n\n{memory_block}"
+
         chat: list[ChatMessage] = [
-            ChatMessage(role="system", content=load_system_prompt())
+            ChatMessage(role="system", content=system_base)
         ]
-        chat += [ChatMessage(role=m.role, content=m.content) for m in history]
-        chat.append(
-            ChatMessage(role="user", content="\n".join(d.text for d in dtos))
-        )
+        for m in history:
+            if m.role == "summary":
+                chat.append(
+                    ChatMessage(
+                        role="system",
+                        content=(
+                            "Compressed memory of earlier conversations:\n"
+                            + m.content
+                        ),
+                    )
+                )
+            else:
+                chat.append(ChatMessage(role=m.role, content=m.content))
+        chat.append(ChatMessage(role="user", content=batch_text))
 
         response = await self._router.generate_with_fallback("dialogue", chat)
         reply_text = response.text or (
@@ -312,6 +503,57 @@ class Worker(LoggerMixin):
         await self._publisher.publish_outgoing(outgoing)
         await self._archive_batch(user_id, incoming=dtos, outgoing=[outgoing])
         return [outgoing]
+
+    async def _long_term_block(self, user_id: UUID, batch_text: str) -> str:
+        """Assemble long-term memory lines for the system prompt.
+
+        Combines the freshest PG facts (confidence-filtered) with
+        semantically similar Qdrant hits, deduped by exact text.
+        Degraded mode: any failure yields an empty block and ERROR
+        log — dialogue continues without memory rather than crashing.
+
+        Args:
+            user_id: Internal user UUID.
+            batch_text: Joined text of the current batch (the query).
+
+        Returns:
+            Formatted memory block, or "" when nothing to add.
+        """
+        try:
+            async with self._session_factory() as session:
+                facts = await HardFactsRepo(session).search_last_updated(
+                    user_id, limit=settings.FACTS_IN_PROMPT_LIMIT
+                )
+            fact_lines = [
+                f"- [{f.category}] {f.key}: {f.value.get('text', '')}"
+                for f in facts
+                if f.confidence >= settings.FACTS_MIN_CONFIDENCE
+                and f.value.get("text")
+            ]
+        except Exception as exc:
+            self._lg.error(f"Facts unavailable for {user_id}: {exc}")
+            fact_lines = []
+
+        hit_lines: list[str] = []
+        if batch_text:
+            try:
+                query_vector = (await self._router.embed([batch_text]))[0]
+                hits = await self._vectors.search(
+                    user_id,
+                    query_vector,
+                    limit=settings.VECTOR_SEARCH_LIMIT,
+                )
+                known = set(fact_lines)
+                hit_lines = [h for h in hits if h and h not in known]
+                hit_lines = [f"- {line}" for line in hit_lines]
+            except Exception as exc:
+                self._lg.error(f"Vector search failed for {user_id}: {exc}")
+
+        if not fact_lines and not hit_lines:
+            return ""
+        parts = ["Long-term memory about this user:"]
+        parts += fact_lines + hit_lines
+        return "\n".join(parts)
 
     async def _archive_batch(
         self,

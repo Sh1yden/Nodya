@@ -2,7 +2,8 @@
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.brain.models import HardFacts
@@ -20,6 +21,52 @@ class HardFactsRepo(BaseRepo[HardFacts]):
             session: Async session used for all queries.
         """
         super().__init__(session, HardFacts)
+
+    async def upsert_fact(
+        self,
+        user_id: UUID,
+        category: str,
+        key: str,
+        value: dict,
+        confidence: float,
+    ) -> int:
+        """Atomically insert or refresh one fact.
+
+        Conflict on (user_id, category, key) updates value/confidence
+        and bumps updated_at. Single statement — race-free against
+        concurrent consolidation runs (unique index backed).
+
+        Args:
+            user_id: Fact owner.
+            category: Grouping bucket (identity/preferences/...).
+            key: Short fact name.
+            value: JSON payload of the fact.
+            confidence: Extraction confidence in [0, 1].
+
+        Returns:
+            fact_id of the inserted or updated row.
+        """
+        stmt = (
+            pg_insert(HardFacts)
+            .values(
+                user_id=user_id,
+                category=category,
+                key=key,
+                value=value,
+                confidence=confidence,
+            )
+            .on_conflict_do_update(
+                index_elements=["user_id", "category", "key"],
+                set_={
+                    "value": value,
+                    "confidence": confidence,
+                    "updated_at": func.now(),
+                },
+            )
+            .returning(HardFacts.fact_id)
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one()
 
     async def get_facts_by_uuid(self, user_id: UUID) -> list[HardFacts]:
         """Fetch every fact belonging to a user.

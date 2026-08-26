@@ -8,6 +8,7 @@ import asyncio
 from contextlib import asynccontextmanager, suppress
 
 from aiogram import Bot
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 
 from app.api import (
@@ -20,8 +21,10 @@ from app.api import (
 )
 from app.api.tunnels import start_tunnel, stop_tunnel
 from app.brain.llm_choice import GeminiProvider, LLMRouter, OpenRouterProvider
+from app.brain.memory.consolidation import ConsolidationJob
 from app.brain.memory.long import AsyncSessionLocal, engine
 from app.brain.memory.short import RedisClient
+from app.brain.memory.vector import VectorMemory
 from app.chats.telegram import TGSender
 from app.chats.telegram import router as telegram_webhook_router
 from app.core import get_logger, settings, setup_logging
@@ -49,6 +52,11 @@ async def lifespan(app: FastAPI):
     publisher = MessagePublisher(settings.rabbitmq_url)
     await publisher.connect()
     redis_client = RedisClient(settings.redis_url)
+    vectors = VectorMemory(
+        host=settings.QDRANT_HOST,
+        port=settings.QDRANT_PORT,
+        collection=settings.QDRANT_COLLECTION,
+    )
 
     worker = Worker(
         broker_url=settings.rabbitmq_url,
@@ -56,6 +64,22 @@ async def lifespan(app: FastAPI):
         session_factory=AsyncSessionLocal,
         publisher=publisher,
         router=router,
+        vectors=vectors,
+    )
+    consolidation = ConsolidationJob(
+        redis_client=redis_client,
+        session_factory=AsyncSessionLocal,
+        router=router,
+        vectors=vectors,
+    )
+    scheduler = AsyncIOScheduler(timezone="UTC")
+    scheduler.add_job(
+        consolidation.run_for_all,
+        "interval",
+        minutes=settings.CONSOLIDATION_SCAN_MINUTES,
+        id="consolidation-scan",
+        max_instances=1,
+        coalesce=True,
     )
     sender = TGSender(
         broker_url=settings.rabbitmq_url,
@@ -78,6 +102,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(worker.run(), name="worker"),
         asyncio.create_task(sender.run(), name="tg-sender"),
     ]
+    scheduler.start()
     app.state.publisher = publisher
     app.state.redis = redis_client
     _lg.info(f"Nodya is up. Webhook: {base_url}/webhook/telegram")
@@ -85,6 +110,7 @@ async def lifespan(app: FastAPI):
     yield
 
     _lg.info("Stopping Nodya...")
+    scheduler.shutdown(wait=False)
     for task in background_tasks:
         task.cancel()
     await asyncio.gather(*background_tasks, return_exceptions=True)
@@ -99,6 +125,7 @@ async def lifespan(app: FastAPI):
     await publisher.close()
     await router.close()
     await redis_client.close()
+    await vectors.close()
     await engine.dispose()
     if tunnel_process is not None:
         await asyncio.to_thread(stop_tunnel, tunnel_process)

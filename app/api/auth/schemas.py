@@ -36,3 +36,10 @@ class RegisterResponse(TokenResponse):
     """Registration result: token plus the created user id."""
 
     user_id: UUID
+
+
+class LinkCodeResponse(BaseModel):
+    """One-time pairing code for linking a Telegram account."""
+
+    code: str
+    expires_in: int
