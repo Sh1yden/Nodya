@@ -142,18 +142,32 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # Will appear once stage-9 tests from TODO_MASTER.md exist —
-  # same service-container pattern as the migrations job.
-  # tests:
-  #   runs-on: ubuntu-latest
-  #   needs: [lint-and-smoke, migrations]
-  #   services:
-  #     postgres: ...
-  #     redis:
-  #       image: redis:8-alpine
-  #       ports: ["6379:6379"]
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: astral-sh/setup-uv@v3
-  #     - run: uv sync --frozen --all-extras
-  #     - run: uv run pytest
+  tests:
+    runs-on: ubuntu-latest
+    needs: [lint-and-smoke]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync --frozen --all-extras
+
+      - name: Run tests
+        run: >
+          uv run pytest
+          --tb=short -q
+          --cov=app
+          --cov-report=term-missing
+          --cov-report=xml
+          -m "not integration"
