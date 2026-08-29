@@ -39,6 +39,7 @@
 | 2026-08-25 | R2 | Англофикация кода: все комментарии/docstrings → EN (Google-style на каждой функции), кириллица в py-файлах = 0 (кроме намеренных дефолтов промптов); логи переведены на f-строки и политику уровней (DEBUG=поток отладки, INFO=пользователь, WARN=непредвиденное, ERROR=деградация, CRITICAL=падение); добавлены DEBUG-крошки (broker connect, state, poller, archive); Better Comments маркеры TODO/!/?. Доки остаются RU |
 | 2026-08-25 | D4 | Долгосрочная память: VectorMemory (Qdrant, ленивая коллекция с авто-dim, payload-фильтр user_id); миграция 06cbb2bf0b3e UNIQUE(user_id,category,key) + upsert_fact ON CONFLICT RETURNING; ConsolidationJob v2 — ОДИН вызов CS-модели даёт facts+summary, атомарный replace_context кладёт саммари ролью "summary" (доки §4.3 уточнены: компрессия вместо голой очистки, обязанность CS из §5.4 операционализирована); APScheduler скан 30 мин / молчание ≥3ч; Worker: топ-20 фактов + 5 семантических хитов в промпт с дедупом и confidence≥0.4; ручной прогон python -m app.brain.memory.consolidation |
 | 2026-08-26 | L1 | Связывание Telegram↔аккаунт: POST /auth/telegram/code (Bearer, одноразовый код GETDEL, TTL 10 мин, алфавит без 0/O/1/I); Worker перехватывает /link до debounce/LLM; мёрж двойника = UPDATE messages/hard_facts → освобождение tg_id → delete dup (порядок против unique-конфликта) → RENAME Redis-ключей → reassign Qdrant payload (фильтр через points=Filter — сигнатура клиента); HTTPBearer в deps → кнопка Authorize в Swagger; частичные сбои переноса репортятся честно. Мёрж владельца выполнен и проверен живьём (47 сообщений, факт, саммари, точка Qdrant под owner) |
+| 2026-08-27 | D5 | Тесты готовы.
 
 Следующий шаг: D4-проактивность (70/20/10, RSS+feed_sources) или browser-канал; затем D5 тесты.
 ---
@@ -896,14 +897,3 @@ class AgentConsumer:
 - `list_directory(path: str) -> SkillResult`
 - Path traversal protection: разрешены только пути внутри `AGENT_ALLOWED_PATHS`
 
----
-
-## Приоритеты немедленных действий (первые 5 коммитов)
-
-| Шаг | Задача | Файлы |
-|---|---|---|
-| 1 | Исправить `all` -> `__all__` | `app/core/__init__.py` |
-| 2 | Исправить `root_prefix` | `app/core/logger.py` |
-| 3 | Переписать модель `Users` | `app/brain/models/Users.py` |
-| 4 | Завершить модель `AuthTokens` + добавить в `__init__` | `app/brain/models/AuthTokens.py`, `__init__.py` |
-| 5 | Создать новую init-миграцию | Alembic |
