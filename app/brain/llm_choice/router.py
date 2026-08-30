@@ -1,9 +1,8 @@
-"""Role router with fallback chains (ADR-6, matrix from tldr notes).
+"""Role router with fallback chains (ADR-6).
 
-A role chain = Gemini candidates (if any) + the OpenRouter fallback
-pair. Transient candidate failure -> backoff pause -> next; fatal ->
-next immediately. Exhausted chain raises LLMError up to the Worker,
-which NACKs the batch into DLQ.
+Chains are configured via settings.LLM_PROVIDER_CHAINS and resolved
+through ProviderRegistry. Transient candidate failure -> backoff -> next;
+fatal -> next immediately. Exhausted chain raises LLMError.
 """
 
 import asyncio
@@ -18,40 +17,26 @@ from .base import (
     LLMTransientError,
     Role,
 )
-from .gemini import GeminiProvider
-from .openrouter import OpenRouterProvider
+from .registry import ProviderRegistry
 
 _BACKOFF_BASE_SECONDS = 0.5
 
 
 def _split_models(raw: str) -> list[str]:
-    """Split a comma-separated model list into clean ids.
-
-    Args:
-        raw: Raw setting value.
-
-    Returns:
-        Non-empty stripped model ids in order.
-    """
+    """Split a comma-separated model list into clean ids."""
     return [m.strip() for m in raw.split(",") if m.strip()]
 
 
 class LLMRouter(LoggerMixin):
-    """Route generation requests across role-specific candidates."""
+    """Route generation requests across role-specific candidate chains."""
 
-    def __init__(
-        self,
-        gemini: GeminiProvider,
-        openrouter: OpenRouterProvider,
-    ) -> None:
-        """Bind providers used to build per-role chains.
+    def __init__(self, registry: ProviderRegistry) -> None:
+        """Bind provider registry used to build per-role chains.
 
         Args:
-            gemini: Primary provider (chat + embeddings).
-            openrouter: Fallback chat provider.
+            registry: ProviderRegistry with registered providers.
         """
-        self._gemini = gemini
-        self._openrouter = openrouter
+        self._registry = registry
 
     def _chain(self, role: Role) -> list[tuple[LLMProvider, str]]:
         """Build the ordered candidate chain for a role.
@@ -62,30 +47,15 @@ class LLMRouter(LoggerMixin):
         Returns:
             List of (provider, model_id) pairs in attempt order.
         """
-        fallback = [
-            (self._openrouter, model)
-            for model in _split_models(settings.LLM_FALLBACK_OPENROUTER)
-        ]
-        if role == "dialogue":
-            gemini_part = [
-                (self._gemini, model)
-                for model in _split_models(settings.LLM_DIALOGUE_GEMINI)
-            ]
-            return gemini_part + fallback
-        if role == "cs":
-            gemini_part = [
-                (self._gemini, model)
-                for model in _split_models(settings.LLM_CS_GEMINI)
-            ]
-            return gemini_part + fallback
-        if role == "bp":
-            bp = [
-                (self._openrouter, model)
-                for model in _split_models(settings.LLM_BP_OPENROUTER)
-            ]
-            return bp + fallback
-        # VS: embeddings exist only at Gemini
-        return [(self._gemini, settings.LLM_EMBED_MODEL)]
+        chain_config = settings.LLM_PROVIDER_CHAINS.get(role, [])
+        result: list[tuple[LLMProvider, str]] = []
+        for item in chain_config:
+            provider_name = item["provider"]
+            models = _split_models(item["models"])
+            provider = self._registry.get(provider_name)
+            for model in models:
+                result.append((provider, model))
+        return result
 
     async def generate_with_fallback(
         self, role: Role, messages: list[ChatMessage]
@@ -136,9 +106,12 @@ class LLMRouter(LoggerMixin):
         Returns:
             One vector per input text.
         """
-        provider, model = self._chain("vs")[0]
+        chain = self._chain("vs")
+        if not chain:
+            raise LLMError("No embedding provider configured for VS role")
+        provider, model = chain[0]
         return await provider.embed(texts, model)
 
     async def close(self) -> None:
         """Release provider HTTP resources on shutdown."""
-        await self._openrouter.close()
+        self._registry.close_all()

@@ -64,19 +64,77 @@ class SettingsSchema(BaseSettings):
     VECTOR_SEARCH_LIMIT: int = Field(default=5)
     FACTS_MIN_CONFIDENCE: float = Field(default=0.4)
 
-    # AI APIs (validated strictly at provider init in main)
+    # AI APIs
     GEMINI_API_KEY: str = Field(default="")
     OPENROUTER_API_KEY: str = Field(default="")
+    GEMINI_CLOUDFLARE_URL: str = Field(
+        default="https://geminifix.shayden.workers.dev/"
+    )
+    GEMINI_ENABLED: bool = Field(default=False)
 
-    # LLM roles (matrix from the Nodya tldr notes: D/CS/BP/VS).
-    # Chains are comma-separated candidate lists; after the Gemini part
-    # the router appends the OpenRouter nemotron fallback pair.
+    # LLM provider chains (new configurable format).
+    # Each role maps to a list of {"provider": "...", "models": "..."}.
+    # Provider names must match registry registrations.
+    LLM_PROVIDER_CHAINS: dict = Field(
+        default={
+            "dialogue": [
+                {
+                    "provider": "gemini_cloudflare",
+                    "models": "gemini-3.5-flash-lite,gemini-3.1-flash-lite",
+                },
+                {
+                    "provider": "openrouter",
+                    "models": (
+                        "nvidia/nemotron-3-ultra-550b-a55b:free,"
+                        "nvidia/nemotron-3-super-120b-a12b:free"
+                    ),
+                },
+            ],
+            "cs": [
+                {
+                    "provider": "gemini_cloudflare",
+                    "models": "gemini-3.6-flash",
+                },
+                {
+                    "provider": "openrouter",
+                    "models": (
+                        "nvidia/nemotron-3-ultra-550b-a55b:free,"
+                        "nvidia/nemotron-3-super-120b-a12b:free"
+                    ),
+                },
+            ],
+            "bp": [
+                {
+                    "provider": "openrouter",
+                    "models": (
+                        "google/gemma-4-31b-it:free,"
+                        "google/gemma-4-26b-a4b-it:free"
+                    ),
+                },
+                {
+                    "provider": "openrouter",
+                    "models": (
+                        "nvidia/nemotron-3-ultra-550b-a55b:free,"
+                        "nvidia/nemotron-3-super-120b-a12b:free"
+                    ),
+                },
+            ],
+            "vs": [
+                {
+                    "provider": "gemini_cloudflare",
+                    "models": "gemini-embedding-2",
+                },
+            ],
+        }
+    )
+
+    # Legacy fields (kept for backward compatibility / gradual migration).
     LLM_DIALOGUE_GEMINI: str = Field(
         default="gemini-3.5-flash-lite,gemini-3.1-flash-lite"
     )
     LLM_CS_GEMINI: str = Field(default="gemini-3.6-flash")
     LLM_BP_OPENROUTER: str = Field(
-        default=("google/gemma-4-31b-it:free,google/gemma-4-26b-a4b-it:free")
+        default="google/gemma-4-31b-it:free,google/gemma-4-26b-a4b-it:free"
     )
     LLM_FALLBACK_OPENROUTER: str = Field(
         default=(

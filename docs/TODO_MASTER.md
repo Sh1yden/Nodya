@@ -39,7 +39,8 @@
 | 2026-08-25 | R2 | Англофикация кода: все комментарии/docstrings → EN (Google-style на каждой функции), кириллица в py-файлах = 0 (кроме намеренных дефолтов промптов); логи переведены на f-строки и политику уровней (DEBUG=поток отладки, INFO=пользователь, WARN=непредвиденное, ERROR=деградация, CRITICAL=падение); добавлены DEBUG-крошки (broker connect, state, poller, archive); Better Comments маркеры TODO/!/?. Доки остаются RU |
 | 2026-08-25 | D4 | Долгосрочная память: VectorMemory (Qdrant, ленивая коллекция с авто-dim, payload-фильтр user_id); миграция 06cbb2bf0b3e UNIQUE(user_id,category,key) + upsert_fact ON CONFLICT RETURNING; ConsolidationJob v2 — ОДИН вызов CS-модели даёт facts+summary, атомарный replace_context кладёт саммари ролью "summary" (доки §4.3 уточнены: компрессия вместо голой очистки, обязанность CS из §5.4 операционализирована); APScheduler скан 30 мин / молчание ≥3ч; Worker: топ-20 фактов + 5 семантических хитов в промпт с дедупом и confidence≥0.4; ручной прогон python -m app.brain.memory.consolidation |
 | 2026-08-26 | L1 | Связывание Telegram↔аккаунт: POST /auth/telegram/code (Bearer, одноразовый код GETDEL, TTL 10 мин, алфавит без 0/O/1/I); Worker перехватывает /link до debounce/LLM; мёрж двойника = UPDATE messages/hard_facts → освобождение tg_id → delete dup (порядок против unique-конфликта) → RENAME Redis-ключей → reassign Qdrant payload (фильтр через points=Filter — сигнатура клиента); HTTPBearer в deps → кнопка Authorize в Swagger; частичные сбои переноса репортятся честно. Мёрж владельца выполнен и проверен живьём (47 сообщений, факт, саммари, точка Qdrant под owner) |
-| 2026-08-27 | D5 | Тесты готовы.
+| 2026-08-27 | D5 | Тесты готовы. |
+| 2026-08-30 | R3 | Рефакторинг LLM-провайдеров: добавлен ProviderRegistry (ленивая инициализация, конфиг-цепочки), заменён прямой Gemini на GeminiCloudflareProvider (httpx → Cloudflare Worker https://geminifix.shayden.workers.dev/), старый GeminiProvider отключён через GEMINI_ENABLED=false. Роутер теперь строит цепочки из настроек LLM_PROVIDER_CHAINS. Обновлены тесты и доки. |
 
 Следующий шаг: D4-проактивность (70/20/10, RSS+feed_sources) или browser-канал; затем D5 тесты.
 ---
@@ -847,6 +848,48 @@ async def retry_with_backoff(
 ### 10.2 CLI
 - Отдельный Python-скрипт или пакет
 - `pip install nodya-cli` -> Команда `nodya ask "..."` -> HTTP-запрос к `/api/chats/browser/send`
+
+---
+
+## **Инкремент R3: Рефакторинг LLM-провайдеров (2026-08-30)**
+
+### R3.1 - [x] `ProviderRegistry` — центральный реестр с ленивой инициализацией
+- Файл: `app/brain/llm_choice/registry.py` (NEW)
+- Регистрация фабрик провайдеров по имени
+- `get(name)` — lazy init + проверка `enabled`
+- `close_all()` — graceful shutdown
+
+### R3.2 - [x] `GeminiCloudflareProvider` — полная реализация на httpx
+- Файл: `app/brain/llm_choice/gemini_from_cloudflare.py` (REWRITE)
+- `POST /chat/completions` (OpenAI format) для chat
+- `POST /embeddings` (OpenAI format) для embeddings
+- Auth: `Authorization: Bearer {GEMINI_API_KEY}`
+- Ошибки: 429/5xx → LLMTransientError, 4xx → LLMFatalError
+- **Без стриминга**
+
+### R3.3 - [x] Конфиг в `config.py`
+- `GEMINI_CLOUDFLARE_URL: str = "https://geminifix.shayden.workers.dev/"`
+- `GEMINI_ENABLED: bool = False` — старый провайдер выключен
+- `LLM_PROVIDER_CHAINS: dict` — цепочки по ролям (dialogue/cs/bp/vs)
+
+### R3.4 - [x] `LLMRouter` рефактор под реестр
+- Конструктор: `__init__(self, registry: ProviderRegistry)`
+- `_chain(role)` читает `settings.LLM_PROVIDER_CHAINS[role]`
+- Провайдеры получает через `registry.get(provider_name)`
+
+### R3.5 - [x] `main.py` — сборка через реестр
+- Создание `ProviderRegistry(settings)`
+- Регистрация: `gemini_cloudflare`, `openrouter` (и `gemini` если enabled)
+- Передача реестра в `LLMRouter`
+
+### R3.6 - [x] Тесты
+- `tests/unit/llm/test_gemini_cloudflare.py` (NEW)
+- Адаптация `test_router.py` под мокирование `registry.get()`
+
+### R3.7 - [x] Документация
+- `docs/ARCHITECTURE_FULL.md` — §5.4, добавление схемы реестра
+- `docs/README_PROJECT.md` — технологии + env
+- `docs/TODO_MASTER.md` — этот инкремент
 
 ---
 

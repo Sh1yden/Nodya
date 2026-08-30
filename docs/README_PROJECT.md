@@ -24,8 +24,8 @@
 ## Технологии
 
 FastAPI · SQLAlchemy (async) · PostgreSQL 16 · Redis 8 · RabbitMQ · Qdrant
-Google AI Studio (Gemini) · OpenRouter · Alembic · Argon2id · APScheduler
-Python 3.13 · Docker Compose
+Google AI Studio (Gemini) via Cloudflare Worker · OpenRouter · Alembic · Argon2id · APScheduler
+Python 3.13 · Docker Compose · httpx
 
 ---
 
@@ -48,7 +48,8 @@ cp .env.example .env
 Отредактируйте `.env`, указав свои ключи:
 - `TELEGRAM_BOT_TOKEN` — токен Telegram-бота
 - `TELEGRAM_WEBHOOK_SECRET` — секрет вебхука (любая длинная строка)
-- `GEMINI_API_KEY` — ключ Google AI Studio
+- `GEMINI_API_KEY` — ключ Google AI Studio (используется через Cloudflare Worker)
+- `GEMINI_CLOUDFLARE_URL` — URL Cloudflare Worker (по умолчанию `https://geminifix.shayden.workers.dev/`)
 - `OWNER_USERNAME` — username владельца
 
 Про `TELEGRAM_WEBHOOK_URL`:

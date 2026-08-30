@@ -11,11 +11,14 @@ from .base import (
     ToolCall,
 )
 from .gemini import GeminiProvider
+from .gemini_from_cloudflare import GeminiCloudflareProvider
 from .openrouter import OpenRouterProvider
+from .registry import ProviderDisabledError, ProviderRegistry
 from .router import LLMRouter
 
 __all__ = [
     "ChatMessage",
+    "GeminiCloudflareProvider",
     "GeminiProvider",
     "LLMError",
     "LLMFatalError",
@@ -24,6 +27,8 @@ __all__ = [
     "LLMRouter",
     "LLMTransientError",
     "OpenRouterProvider",
+    "ProviderDisabledError",
+    "ProviderRegistry",
     "Role",
     "ToolCall",
 ]

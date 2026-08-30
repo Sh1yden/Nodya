@@ -10,9 +10,11 @@ from app.brain.llm_choice.base import (
     ChatMessage,
     LLMError,
     LLMFatalError,
+    LLMProvider,
     LLMResponse,
     LLMTransientError,
 )
+from app.brain.llm_choice.registry import ProviderRegistry
 from app.brain.llm_choice.router import LLMRouter, _split_models
 
 
@@ -38,47 +40,90 @@ class TestSplitModels:
         assert result == ["a", "b"]
 
 
+def _make_mock_registry(
+    gemini: LLMProvider | None = None, openrouter: LLMProvider | None = None
+) -> ProviderRegistry:
+    registry = Mock(spec=ProviderRegistry)
+    providers = {}
+    if gemini:
+        providers["gemini_cloudflare"] = gemini
+    if openrouter:
+        providers["openrouter"] = openrouter
+
+    def get_provider(name: str) -> LLMProvider:
+        if name not in providers:
+            raise KeyError(f"Provider '{name}' not registered")
+        return providers[name]
+
+    registry.get.side_effect = get_provider
+    return registry
+
+
 class TestLLMRouterChain:
     """Test chain construction for different roles."""
 
     @patch("app.brain.llm_choice.router.settings")
     def test_dialogue_chain(self, mock_settings: Mock) -> None:
-        mock_settings.LLM_DIALOGUE_GEMINI = "gemini-flash"
-        mock_settings.LLM_FALLBACK_OPENROUTER = "nemotron-free"
-        mock_settings.LLM_CS_GEMINI = "gemini-cs"
-        mock_settings.LLM_BP_OPENROUTER = "gemma-free"
-        mock_settings.LLM_EMBED_MODEL = "gemini-embed"
+        mock_settings.LLM_PROVIDER_CHAINS = {
+            "dialogue": [
+                {"provider": "gemini_cloudflare", "models": "gemini-flash"},
+                {"provider": "openrouter", "models": "nemotron-free"},
+            ],
+            "cs": [],
+            "bp": [],
+            "vs": [
+                {"provider": "gemini_cloudflare", "models": "gemini-embed"}
+            ],
+        }
 
         gemini = AsyncMock()
         openrouter = AsyncMock()
-        router = LLMRouter(gemini=gemini, openrouter=openrouter)
+        registry = _make_mock_registry(gemini, openrouter)
+        router = LLMRouter(registry=registry)
 
         chain = router._chain("dialogue")
-        assert len(chain) >= 2
+        assert len(chain) == 2
         assert chain[0][0] is gemini
+        assert chain[0][1] == "gemini-flash"
+        assert chain[1][0] is openrouter
+        assert chain[1][1] == "nemotron-free"
 
     @patch("app.brain.llm_choice.router.settings")
     def test_bp_chain(self, mock_settings: Mock) -> None:
-        mock_settings.LLM_DIALOGUE_GEMINI = "gemini-flash"
-        mock_settings.LLM_FALLBACK_OPENROUTER = "nemotron-free"
-        mock_settings.LLM_CS_GEMINI = "gemini-cs"
-        mock_settings.LLM_BP_OPENROUTER = "gemma-free"
-        mock_settings.LLM_EMBED_MODEL = "gemini-embed"
+        mock_settings.LLM_PROVIDER_CHAINS = {
+            "dialogue": [],
+            "cs": [],
+            "bp": [
+                {"provider": "openrouter", "models": "gemma-free"},
+                {"provider": "openrouter", "models": "nemotron-free"},
+            ],
+            "vs": [],
+        }
 
         gemini = AsyncMock()
         openrouter = AsyncMock()
-        router = LLMRouter(gemini=gemini, openrouter=openrouter)
+        registry = _make_mock_registry(gemini, openrouter)
+        router = LLMRouter(registry=registry)
 
         chain = router._chain("bp")
+        assert len(chain) == 2
         assert chain[0][0] is openrouter
+        assert chain[0][1] == "gemma-free"
+        assert chain[1][0] is openrouter
+        assert chain[1][1] == "nemotron-free"
 
     @patch("app.brain.llm_choice.router.settings")
     def test_vs_chain_single_gemini(self, mock_settings: Mock) -> None:
-        mock_settings.LLM_EMBED_MODEL = "gemini-embed"
+        mock_settings.LLM_PROVIDER_CHAINS = {
+            "vs": [
+                {"provider": "gemini_cloudflare", "models": "gemini-embed"}
+            ],
+        }
 
         gemini = AsyncMock()
         openrouter = AsyncMock()
-        router = LLMRouter(gemini=gemini, openrouter=openrouter)
+        registry = _make_mock_registry(gemini, openrouter)
+        router = LLMRouter(registry=registry)
 
         chain = router._chain("vs")
         assert len(chain) == 1
@@ -95,16 +140,23 @@ class TestLLMRouterGenerateWithFallback:
     async def test_success_on_first_candidate(
         self, mock_sleep: AsyncMock, mock_settings: Mock
     ) -> None:
-        mock_settings.LLM_DIALOGUE_GEMINI = "gemini-flash"
-        mock_settings.LLM_FALLBACK_OPENROUTER = "nemotron-free"
-        mock_settings.LLM_CS_GEMINI = "gemini-cs"
-        mock_settings.LLM_BP_OPENROUTER = "gemma-free"
-        mock_settings.LLM_EMBED_MODEL = "gemini-embed"
+        mock_settings.LLM_PROVIDER_CHAINS = {
+            "dialogue": [
+                {"provider": "gemini_cloudflare", "models": "gemini-flash"},
+                {"provider": "openrouter", "models": "nemotron-free"},
+            ],
+            "cs": [],
+            "bp": [],
+            "vs": [
+                {"provider": "gemini_cloudflare", "models": "gemini-embed"}
+            ],
+        }
 
         gemini = AsyncMock()
         gemini.generate = AsyncMock(return_value=LLMResponse(text="ok"))
         openrouter = AsyncMock()
-        router = LLMRouter(gemini=gemini, openrouter=openrouter)
+        registry = _make_mock_registry(gemini, openrouter)
+        router = LLMRouter(registry=registry)
 
         result = await router.generate_with_fallback(
             "dialogue",
@@ -120,11 +172,17 @@ class TestLLMRouterGenerateWithFallback:
     async def test_fallback_on_transient_error(
         self, mock_sleep: AsyncMock, mock_settings: Mock
     ) -> None:
-        mock_settings.LLM_DIALOGUE_GEMINI = "gemini-flash"
-        mock_settings.LLM_FALLBACK_OPENROUTER = "nemotron-free"
-        mock_settings.LLM_CS_GEMINI = "gemini-cs"
-        mock_settings.LLM_BP_OPENROUTER = "gemma-free"
-        mock_settings.LLM_EMBED_MODEL = "gemini-embed"
+        mock_settings.LLM_PROVIDER_CHAINS = {
+            "dialogue": [
+                {"provider": "gemini_cloudflare", "models": "gemini-flash"},
+                {"provider": "openrouter", "models": "nemotron-free"},
+            ],
+            "cs": [],
+            "bp": [],
+            "vs": [
+                {"provider": "gemini_cloudflare", "models": "gemini-embed"}
+            ],
+        }
 
         gemini = AsyncMock()
         gemini.generate = AsyncMock(side_effect=LLMTransientError("429"))
@@ -132,7 +190,8 @@ class TestLLMRouterGenerateWithFallback:
         openrouter.generate = AsyncMock(
             return_value=LLMResponse(text="fallback-ok")
         )
-        router = LLMRouter(gemini=gemini, openrouter=openrouter)
+        registry = _make_mock_registry(gemini, openrouter)
+        router = LLMRouter(registry=registry)
 
         result = await router.generate_with_fallback(
             "dialogue",
@@ -149,11 +208,17 @@ class TestLLMRouterGenerateWithFallback:
     async def test_all_fail_raises_llm_error(
         self, mock_sleep: AsyncMock, mock_settings: Mock
     ) -> None:
-        mock_settings.LLM_DIALOGUE_GEMINI = "gemini-flash"
-        mock_settings.LLM_FALLBACK_OPENROUTER = "nemotron-free"
-        mock_settings.LLM_CS_GEMINI = "gemini-cs"
-        mock_settings.LLM_BP_OPENROUTER = "gemma-free"
-        mock_settings.LLM_EMBED_MODEL = "gemini-embed"
+        mock_settings.LLM_PROVIDER_CHAINS = {
+            "dialogue": [
+                {"provider": "gemini_cloudflare", "models": "gemini-flash"},
+                {"provider": "openrouter", "models": "nemotron-free"},
+            ],
+            "cs": [],
+            "bp": [],
+            "vs": [
+                {"provider": "gemini_cloudflare", "models": "gemini-embed"}
+            ],
+        }
 
         gemini = AsyncMock()
         gemini.generate = AsyncMock(side_effect=LLMTransientError("down"))
@@ -161,7 +226,8 @@ class TestLLMRouterGenerateWithFallback:
         openrouter.generate = AsyncMock(
             side_effect=LLMTransientError("also down")
         )
-        router = LLMRouter(gemini=gemini, openrouter=openrouter)
+        registry = _make_mock_registry(gemini, openrouter)
+        router = LLMRouter(registry=registry)
 
         with pytest.raises(LLMError):
             await router.generate_with_fallback(
@@ -177,11 +243,17 @@ class TestLLMRouterGenerateWithFallback:
     async def test_fatal_error_skips_to_next(
         self, mock_sleep: AsyncMock, mock_settings: Mock
     ) -> None:
-        mock_settings.LLM_DIALOGUE_GEMINI = "gemini-flash"
-        mock_settings.LLM_FALLBACK_OPENROUTER = "nemotron-free"
-        mock_settings.LLM_CS_GEMINI = "gemini-cs"
-        mock_settings.LLM_BP_OPENROUTER = "gemma-free"
-        mock_settings.LLM_EMBED_MODEL = "gemini-embed"
+        mock_settings.LLM_PROVIDER_CHAINS = {
+            "dialogue": [
+                {"provider": "gemini_cloudflare", "models": "gemini-flash"},
+                {"provider": "openrouter", "models": "nemotron-free"},
+            ],
+            "cs": [],
+            "bp": [],
+            "vs": [
+                {"provider": "gemini_cloudflare", "models": "gemini-embed"}
+            ],
+        }
 
         gemini = AsyncMock()
         gemini.generate = AsyncMock(side_effect=LLMFatalError("bad model"))
@@ -189,7 +261,8 @@ class TestLLMRouterGenerateWithFallback:
         openrouter.generate = AsyncMock(
             return_value=LLMResponse(text="after-fatal")
         )
-        router = LLMRouter(gemini=gemini, openrouter=openrouter)
+        registry = _make_mock_registry(gemini, openrouter)
+        router = LLMRouter(registry=registry)
 
         result = await router.generate_with_fallback(
             "dialogue",
@@ -204,12 +277,17 @@ class TestLLMRouterEmbed:
     async def test_embed_delegates_to_gemini(
         self, mock_settings: Mock
     ) -> None:
-        mock_settings.LLM_EMBED_MODEL = "gemini-embed"
+        mock_settings.LLM_PROVIDER_CHAINS = {
+            "vs": [
+                {"provider": "gemini_cloudflare", "models": "gemini-embed"}
+            ],
+        }
 
         gemini = AsyncMock()
         gemini.embed = AsyncMock(return_value=[[0.1, 0.2]])
         openrouter = AsyncMock()
-        router = LLMRouter(gemini=gemini, openrouter=openrouter)
+        registry = _make_mock_registry(gemini, openrouter)
+        router = LLMRouter(registry=registry)
 
         result = await router.embed(["hello"])
         assert result == [[0.1, 0.2]]

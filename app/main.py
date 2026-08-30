@@ -20,7 +20,13 @@ from app.api import (
     ping_rabbitmq,
 )
 from app.api.tunnels import start_tunnel, stop_tunnel
-from app.brain.llm_choice import GeminiProvider, LLMRouter, OpenRouterProvider
+from app.brain.llm_choice import (
+    GeminiCloudflareProvider,
+    GeminiProvider,
+    LLMRouter,
+    OpenRouterProvider,
+    ProviderRegistry,
+)
 from app.brain.memory.consolidation import ConsolidationJob
 from app.brain.memory.long import AsyncSessionLocal, engine
 from app.brain.memory.short import RedisClient
@@ -45,10 +51,16 @@ async def lifespan(app: FastAPI):
         None once the application is fully running.
     """
     await _fail_fast()
-    router = LLMRouter(
-        gemini=GeminiProvider(settings.GEMINI_API_KEY),
-        openrouter=OpenRouterProvider(settings.OPENROUTER_API_KEY),
+
+    registry = ProviderRegistry(settings)
+    registry.register(
+        "gemini_cloudflare", GeminiCloudflareProvider, enabled=True
     )
+    registry.register("openrouter", OpenRouterProvider, enabled=True)
+    if settings.GEMINI_ENABLED:
+        registry.register("gemini", GeminiProvider, enabled=True)
+
+    router = LLMRouter(registry=registry)
     publisher = MessagePublisher(settings.rabbitmq_url)
     await publisher.connect()
     redis_client = RedisClient(settings.redis_url)

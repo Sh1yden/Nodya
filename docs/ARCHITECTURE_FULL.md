@@ -42,8 +42,8 @@
 | **Кэш/состояния** | Redis 8 | Short-term memory (state, context, lock, debounce, presence) |
 | **Брокер сообщений** | RabbitMQ | Message queue (incoming, outgoing, agent commands) |
 | **Векторное хранилище** | Qdrant | Semantic search для RAG |
-| **LLM (primary)** | Google AI Studio (Gemini 2.0 Flash/Pro) | Генерация ответов, эмбеддинги, tool calling |
-| **LLM (fallback)** | OpenRouter | Резервный провайдер при недоступности Gemini |
+| **LLM (primary)** | Google AI Studio (Gemini) via Cloudflare Worker | Генерация ответов, эмбеддинги, tool calling. Прокси через `https://geminifix.shayden.workers.dev/` для обхода датацентров. |
+| **LLM (fallback)** | OpenRouter | Резервный провайдер при недоступности Gemini Cloudflare. |
 | **HTTP-клиент** | httpx (async) | Запросы к внешним API (LLM, Telegram, RSS) |
 | **Планировщик** | APScheduler | Фоновые задачи (consolidation, background parser) |
 | **Хэширование паролей** | argon2-cffi | Argon2id для паролей и токенов |
@@ -487,49 +487,82 @@ class Worker:
 
 ### 5.4 LLM-слой (`app/brain/llm_choice/`)
 
+Архитектура LLM-слоя построена на трёх компонентах:
+
+1. **`ProviderRegistry`** — центральный реестр провайдеров с ленивой инициализацией.
+   Провайдеры регистрируются фабриками, экземпляр создаётся при первом вызове `get(name)`.
+   Поддерживает флаг `enabled` для отключения провайдеров без удаления кода.
+
+2. **Провайдеры** (реализуют `LLMProvider`):
+   - **`GeminiCloudflareProvider`** — основной провайдер чата и эмбеддингов.
+     Работает через Cloudflare Worker (`GEMINI_CLOUDFLARE_URL`), который проксирует
+     запросы к Google AI Studio. Использует OpenAI-совместимый REST API (`httpx`),
+     без стриминга. Auth: `Authorization: Bearer <GEMINI_API_KEY>`.
+   - **`OpenRouterProvider`** — фоллбэк-провайдер только для чата (нет эмбеддингов).
+   - **`GeminiProvider`** (legacy) — прямой доступ через `google-genai` SDK.
+     Отключён по умолчанию (`GEMINI_ENABLED=false`), оставлен для обратной совместимости.
+
+3. **`LLMRouter`** — строит цепочки кандидатов из конфига `LLM_PROVIDER_CHAINS`.
+   Цепочка для каждой роли — список пар (provider, model). При transient-ошибке
+   (429/5xx) — экспоненциальный бэкофф и переход к следующему; при fatal (4xx) —
+   мгновенный переход. Эмбеддинги (VS) идут только через Gemini Cloudflare.
+
 ```python
 class LLMProvider(ABC):
-    """Абстрактный провайдер LLM."""
-
     @abstractmethod
     async def generate(
-        self, prompt: str, tools: list[ToolSpec] | None = None
+        self,
+        messages: list[ChatMessage],
+        model: str,
+        tools: list[dict] | None = None,
     ) -> LLMResponse: ...
 
+    @abstractmethod
+    async def embed(self, texts: list[str], model: str) -> list[list[float]]: ...
 
-class GeminiProvider(LLMProvider):
-    """Google AI Studio Gemini API."""
 
-
-class OpenRouterProvider(LLMProvider):
-    """OpenRouter API (fallback)."""
+class ProviderRegistry:
+    def __init__(self, settings: SettingsSchema): ...
+    def register(self, name: str, factory: Callable, enabled: bool = True): ...
+    def get(self, name: str) -> LLMProvider: ...          # lazy init
+    def close_all(self): ...
 
 
 class LLMRouter:
-    """
-    Маршрутизация по 4 ролям (из tldraw-заметок):
-
-    Роль D (Dialogue) — "Good нейросети"
-        Модель: Gemini 3.5 Flash (primary) / Gemini 3.1 Flash Lite (fallback)
-        Назначение: Основной диалог с пользователем. Быстрый ответ, tool calling
-
-    Роль CS (Compact-Session / Sleep) — "Best нейросети"
-        Модель: Gemini 3.6 Flash
-        Назначение: Извлечение фактов из контекста, компрессия памяти,
-                    consolidation. Медленнее, но точнее — "спит" и анализирует
-
-    Роль BP (Background-Parser) — "Local || free"
-        Модель: Gemma 4 (31B|26B) через OpenRouter (free tier)
-        Назначение: Парсинг RSS/TG-каналов, фильтр релевантности.
-                    Не требует высокой точности, важна бесплатность/локал
-
-    Роль VS (Vector-Search) — "Embedding models"
-        Модель: Gemini Embedding 2 / OpenRouter embedding API
-        Назначение: Перевод текста в векторные эмбеддинги для Qdrant
-
-    Fallback: При недоступности primary -> OpenRouter (тот же уровень модели)
-    """
+    def __init__(self, registry: ProviderRegistry): ...
+    def _chain(self, role: Role) -> list[tuple[LLMProvider, str]]: ...
+    async def generate_with_fallback(
+        self, role: Role, messages: list[ChatMessage]
+    ) -> LLMResponse: ...
+    async def embed(self, texts: list[str]) -> list[list[float]]: ...
+    async def close(self) -> None: ...
 ```
+
+**Конфигурация цепочек (`settings.LLM_PROVIDER_CHAINS`):**
+
+```python
+LLM_PROVIDER_CHAINS = {
+    "dialogue": [
+        {"provider": "gemini_cloudflare", "models": "gemini-3.5-flash-lite,gemini-3.1-flash-lite"},
+        {"provider": "openrouter", "models": "nvidia/nemotron-3-ultra-550b-a55b:free,..."},
+    ],
+    "cs": [
+        {"provider": "gemini_cloudflare", "models": "gemini-3.6-flash"},
+        {"provider": "openrouter", "models": "nvidia/nemotron-3-ultra-550b-a55b:free,..."},
+    ],
+    "bp": [
+        {"provider": "openrouter", "models": "google/gemma-4-31b-it:free,..."},
+        {"provider": "openrouter", "models": "nvidia/nemotron-3-ultra-550b-a55b:free,..."},
+    ],
+    "vs": [
+        {"provider": "gemini_cloudflare", "models": "gemini-embedding-2"},
+    ],
+}
+```
+
+Добавление нового провайдера = регистрация в `ProviderRegistry` (в `main.py`)
++ добавление записи в `LLM_PROVIDER_CHAINS` (в `.env` или `config.py`).
+Никаких изменений в `LLMRouter` не требуется.
 
 ### 5.5 Память
 
@@ -780,6 +813,36 @@ class SettingsSchema(BaseSettings):
     # --- LLM ---
     GEMINI_API_KEY: str = ""
     OPENROUTER_API_KEY: str = ""
+    GEMINI_CLOUDFLARE_URL: str = "https://geminifix.shayden.workers.dev/"
+    GEMINI_ENABLED: bool = False
+
+    # LLM provider chains (config-driven fallback chains).
+    # Each role -> list of {"provider": "...", "models": "..."}.
+    LLM_PROVIDER_CHAINS: dict = {
+        "dialogue": [
+            {"provider": "gemini_cloudflare", "models": "gemini-3.5-flash-lite,gemini-3.1-flash-lite"},
+            {"provider": "openrouter", "models": "nvidia/nemotron-3-ultra-550b-a55b:free,..."},
+        ],
+        "cs": [
+            {"provider": "gemini_cloudflare", "models": "gemini-3.6-flash"},
+            {"provider": "openrouter", "models": "nvidia/nemotron-3-ultra-550b-a55b:free,..."},
+        ],
+        "bp": [
+            {"provider": "openrouter", "models": "google/gemma-4-31b-it:free,..."},
+            {"provider": "openrouter", "models": "nvidia/nemotron-3-ultra-550b-a55b:free,..."},
+        ],
+        "vs": [
+            {"provider": "gemini_cloudflare", "models": "gemini-embedding-2"},
+        ],
+    }
+
+    # Legacy fields (kept for backward compatibility).
+    LLM_DIALOGUE_GEMINI: str = "gemini-3.5-flash-lite,gemini-3.1-flash-lite"
+    LLM_CS_GEMINI: str = "gemini-3.6-flash"
+    LLM_BP_OPENROUTER: str = "google/gemma-4-31b-it:free,google/gemma-4-26b-a4b-it:free"
+    LLM_FALLBACK_OPENROUTER: str = "nvidia/nemotron-3-ultra-550b-a55b:free,nvidia/nemotron-3-super-120b-a12b:free"
+    LLM_EMBED_MODEL: str = "gemini-embedding-2"
+    LLM_HISTORY_LIMIT: int = 20
 
     # --- Telegram ---
     TELEGRAM_BOT_TOKEN: str = ""
