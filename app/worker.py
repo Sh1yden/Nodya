@@ -44,6 +44,7 @@ from app.common import (
     IncomingMessage,
     OutgoingMessage,
     ScheduledEnvelope,
+    TypingEvent,
     declare_incoming_queue,
     declare_topology,
 )
@@ -366,15 +367,36 @@ class Worker(LoggerMixin):
             )
             await self._defer_incoming(dtos, amqp_messages, retry=0)
             return
+        # Typing indicator (ADR-17): publish start/stop via RabbitMQ,
+        # consumed by channel senders; failures must not break batch.
+        await self._publish_typing(user.user_id, first.channel, "start")
         try:
             await self._run_locked(user.user_id, dtos)
         finally:
+            await self._publish_typing(user.user_id, first.channel, "stop")
             await self._redis.release_lock(user.user_id, lock_token)
         self._lg.debug(
             f"Batch processed: n={len(dtos)} user_id={user.user_id}"
         )
         for amqp_message in amqp_messages:
             await amqp_message.ack()
+
+    async def _publish_typing(
+        self, user_id: UUID, channel: str, action: str
+    ) -> None:
+        """Publish typing event, suppressing errors.
+
+        Args:
+            user_id: Internal user UUID.
+            channel: Channel name.
+            action: ``start`` or ``stop``.
+        """
+        try:
+            await self._publisher.publish_typing(
+                TypingEvent(user_id=user_id, channel=channel, action=action)
+            )
+        except Exception as exc:
+            self._lg.warning(f"Typing {action} failed for {user_id}: {exc}")
 
     async def _run_locked(
         self, user_id: UUID, dtos: list[IncomingMessage]
@@ -619,10 +641,13 @@ class Worker(LoggerMixin):
             user = await repo.get_by_field("telegram_id", telegram_id)
             if user is not None:
                 return user
+            from app.brain.repositories.security import hash_password
+
             user = Users(
                 username=self._generated_username(telegram_id),
                 telegram_id=telegram_id,
-                passwd_hash=uuid4().hex,
+                passwd_hash=hash_password(uuid4().hex),
+                has_usable_password=False,
                 role="user",
                 settings={},
             )
@@ -724,7 +749,9 @@ class Worker(LoggerMixin):
                 dtos, [], retry=envelope.retry_count + 1
             )
             return
+        await self._publish_typing(user.user_id, first.channel, "start")
         try:
             await self._run_locked(user.user_id, dtos)
         finally:
+            await self._publish_typing(user.user_id, first.channel, "stop")
             await self._redis.release_lock(user.user_id, lock_token)

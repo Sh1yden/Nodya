@@ -18,16 +18,20 @@ from aio_pika.abc import (
 )
 from aiogram import Bot
 from aiogram.exceptions import (
+    TelegramAPIError,
     TelegramNetworkError,
     TelegramRetryAfter,
 )
 
 from app.brain.memory.long import AsyncSessionLocal
 from app.brain.repositories import UsersRepo
+from app.chats.typing import TelegramTypingIndicator
 from app.common import (
     OutgoingMessage,
+    TypingEvent,
     declare_outgoing_queue,
     declare_topology,
+    declare_typing_queue,
 )
 from app.core import LoggerMixin
 
@@ -58,25 +62,34 @@ class TGSender(LoggerMixin):
         self._connection: AbstractRobustConnection | None = None
         self._channel: AbstractRobustChannel | None = None
         self._queue: AbstractRobustQueue | None = None
+        self._typing_queue: AbstractRobustQueue | None = None
+        self._typing_indicator: TelegramTypingIndicator | None = None
         self._running = False
 
     async def run(self) -> None:
-        """Connect to the broker and start consuming outgoing."""
+        """Connect to the broker and start consuming outgoing and typing."""
         if not self._bot_token:
             raise RuntimeError("TELEGRAM_BOT_TOKEN is empty.")
         self._lg.debug("TGSender starting...")
         self._bot = Bot(token=self._bot_token)
+        self._typing_indicator = TelegramTypingIndicator(self._bot)
         self._connection = await aio_pika.connect_robust(self._url)
         self._channel = await self._connection.channel()
         await self._channel.set_qos(prefetch_count=_PREFETCH_COUNT)
         exchange = await declare_topology(self._channel)
         self._queue = await declare_outgoing_queue(self._channel, exchange)
+        self._typing_queue = await declare_typing_queue(
+            self._channel, exchange
+        )
         self._running = True
         await self._queue.consume(self._on_message)
+        await self._typing_queue.consume(self._on_typing)
 
     async def stop(self) -> None:
         """Graceful shutdown: consumer, bot session, broker."""
         self._running = False
+        if self._typing_indicator is not None:
+            await self._typing_indicator.stop_all()
         if self._connection is not None and not self._connection.is_closed:
             await self._connection.close()
         if self._bot is not None:
@@ -110,7 +123,6 @@ class TGSender(LoggerMixin):
             return
 
         assert self._bot is not None
-        reason: str
         for attempt in range(_MAX_SEND_ATTEMPTS):
             try:
                 await self._bot.send_message(chat_id=chat_id, text=dto.text)
@@ -122,21 +134,67 @@ class TGSender(LoggerMixin):
                 return
             except TelegramRetryAfter as exc:
                 delay = float(exc.retry_after)
-                reason = type(exc).__name__
+                self._lg.warning(
+                    f"Attempt {attempt + 1}/{_MAX_SEND_ATTEMPTS} failed "
+                    f"({type(exc).__name__}), retrying in {delay:.1f}s."
+                )
+                await asyncio.sleep(delay)
+                continue
             except TelegramNetworkError as exc:
                 delay = 0.5 * (2**attempt)
-                reason = type(exc).__name__
-            self._lg.warning(
-                f"Attempt {attempt + 1}/{_MAX_SEND_ATTEMPTS} failed "
-                f"({reason}), retrying in {delay:.1f}s."
-            )
-            await asyncio.sleep(delay)
+                self._lg.warning(
+                    f"Attempt {attempt + 1}/{_MAX_SEND_ATTEMPTS} failed "
+                    f"({type(exc).__name__}), retrying in {delay:.1f}s."
+                )
+                await asyncio.sleep(delay)
+                continue
+            except TelegramAPIError as exc:
+                # Permanent errors (400, 403, blocked, etc.) must not
+                # hang the consumer: ACK or DLQ immediately without
+                # further requeue loops.
+                self._lg.error(
+                    f"Telegram API error for user_id={dto.user_id}: "
+                    f"{exc} — dropping."
+                )
+                await message.nack(requeue=False)
+                return
 
         self._lg.error(
             f"Not delivered after {_MAX_SEND_ATTEMPTS} attempts, "
             f"user_id={dto.user_id} — DLQ."
         )
         await message.nack(requeue=False)
+
+    async def _on_typing(self, message: AbstractIncomingMessage) -> None:
+        """Handle typing indicator events.
+
+        Args:
+            message: Raw AMQP delivery from typing_events.
+        """
+        try:
+            event = TypingEvent.model_validate_json(message.body)
+        except ValueError:
+            self._lg.warning("Malformed payload in typing queue.")
+            await message.nack(requeue=False)
+            return
+        if event.channel != "telegram":
+            await message.ack()
+            return
+        # Resolve chat_id if not provided.
+        chat_id = event.chat_id
+        if chat_id is None:
+            chat_id = await self._lookup_chat_id(event.user_id)
+        if chat_id is None:
+            await message.ack()
+            return
+        if self._typing_indicator is None:
+            await message.ack()
+            return
+        if event.action == "start":
+            await self._typing_indicator.start(chat_id)
+        else:
+            await self._typing_indicator.stop(chat_id)
+        await message.ack()
 
     async def _lookup_chat_id(self, user_id: UUID) -> int | None:
         """Resolve the telegram_id of a user.

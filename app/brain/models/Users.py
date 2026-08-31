@@ -4,7 +4,17 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import BigInteger, DateTime, String, Uuid, func
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Index,
+    String,
+    Uuid,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -15,6 +25,17 @@ class Users(Base):
     """A Nodya user reachable via telegram/discord/browser/cli."""
 
     __tablename__ = "users"
+    __table_args__ = (
+        Index(
+            "one_owner",
+            "role",
+            unique=True,
+            postgresql_where=text("role = 'owner'"),
+        ),
+        CheckConstraint(
+            "role IN ('owner', 'user')", name="ck_users_role_valid"
+        ),
+    )
 
     user_id: Mapped[UUID] = mapped_column(
         Uuid,
@@ -32,6 +53,9 @@ class Users(Base):
         String(20), nullable=False, unique=True
     )
     passwd_hash: Mapped[str] = mapped_column(String, nullable=False)
+    has_usable_password: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
     role: Mapped[Literal["owner", "user"]] = mapped_column(
         String, nullable=False
     )

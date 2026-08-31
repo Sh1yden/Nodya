@@ -42,11 +42,7 @@ def _env_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
         "FACTS_MIN_CONFIDENCE": "0.4",
         "GEMINI_API_KEY": "test-gemini-key",
         "OPENROUTER_API_KEY": "test-openrouter-key",
-        "LLM_DIALOGUE_GEMINI": "gemini-flash",
-        "LLM_CS_GEMINI": "gemini-flash",
-        "LLM_BP_OPENROUTER": "gemma-free",
-        "LLM_FALLBACK_OPENROUTER": "nemotron-free",
-        "LLM_EMBED_MODEL": "gemini-embedding",
+        "GEMINI_CLOUDFLARE_URL": "https://geminifix.test.workers.dev/",
         "LLM_HISTORY_LIMIT": "20",
         "TELEGRAM_BOT_TOKEN": "1234567890:ABCdefGHIjklMNOpqrSTUvwxYZ",
         "TELEGRAM_WEBHOOK_URL": "https://example.com",
@@ -136,6 +132,7 @@ def mock_publisher() -> AsyncMock:
     pub.publish_incoming = AsyncMock()
     pub.publish_outgoing = AsyncMock()
     pub.publish_dead_letter = AsyncMock()
+    pub.publish_typing = AsyncMock()
     pub.is_connected = True
     return pub
 
@@ -170,6 +167,7 @@ def mock_aiogram_bot() -> AsyncMock:
     """AsyncMock wrapping ``aiogram.Bot``."""
     bot = AsyncMock()
     bot.send_message = AsyncMock()
+    bot.send_chat_action = AsyncMock()
     bot.session.close = AsyncMock()
     bot.delete_webhook = AsyncMock()
     bot.set_webhook = AsyncMock()

@@ -42,8 +42,8 @@
 | **Кэш/состояния** | Redis 8 | Short-term memory (state, context, lock, debounce, presence) |
 | **Брокер сообщений** | RabbitMQ | Message queue (incoming, outgoing, agent commands) |
 | **Векторное хранилище** | Qdrant | Semantic search для RAG |
-| **LLM (primary)** | Google AI Studio (Gemini) via Cloudflare Worker | Генерация ответов, эмбеддинги, tool calling. Прокси через `https://geminifix.shayden.workers.dev/` для обхода датацентров. |
-| **LLM (fallback)** | OpenRouter | Резервный провайдер при недоступности Gemini Cloudflare. |
+| **LLM (primary)** | Google AI Studio (Gemini) via Cloudflare Worker | Генерация ответов, эмбеддинги, tool calling. Прокси через `GEMINI_CLOUDFLARE_URL` (self-hosted Worker, без дефолта). |
+| **LLM (fallback)** | OpenRouter | Резервный провайдер при недоступности Gemini Cloudflare. 3-уровневые цепочки по ролям (см. §5.4). |
 | **HTTP-клиент** | httpx (async) | Запросы к внешним API (LLM, Telegram, RSS) |
 | **Планировщик** | APScheduler | Фоновые задачи (consolidation, background parser) |
 | **Хэширование паролей** | argon2-cffi | Argon2id для паролей и токенов |
@@ -142,6 +142,7 @@ sequenceDiagram
         W->>PG: create_user (авторегистрация для TG/DS)
     end
     W->>R: acquire_lock(user_id)
+    W->>MQ: publish TypingEvent(start)
     W->>R: set_state(user_id, thinking)
     
     par Context Assembly
@@ -163,12 +164,14 @@ sequenceDiagram
     LLM-->>W: LLMResponse (final text)
     W->>R: push_context(user_id, user_msg + assistant_msg)
     W->>R: set_state(user_id, idle)
+    W->>MQ: publish TypingEvent(stop)
     W->>R: release_lock(user_id)
     W->>MQ: publish OutgoingMessage
     W->>MQ: ACK original message
     
     Note over SN: Channel Sender —<br>отдельный consumer на каждый канал
-    
+    MQ->>SN: consume TypingEvent (typing_events)
+    SN->>CH: send_chat_action typing (loop 4s, ADR-17)
     MQ->>SN: consume OutgoingMessage
     alt channel == "telegram"
         SN->>CH: Telegram Bot API (send_message)
@@ -424,8 +427,10 @@ sequenceDiagram
 | `chats/browser/` | `POST /api/chats/browser/send` | Отправка сообщения от browser-клиента (требует токен). Публикация `IncomingMessage` |
 | `chats/browser/` | `GET /ws?token=<token>` | WebSocket для browser: отправка сообщений + получение ответов |
 | `ws.py` | `WebSocketManager` | Менеджер WebSocket-соединений: connect/disconnect/отправка |
-| `auth/` | `POST /auth/register` | Регистрация (username, email, password) -> Users + AuthTokens |
-| `auth/` | `POST /auth/login` | Логин (username, password) -> AuthTokens |
+| `auth/` | `POST /auth/register` | Регистрация (`role=user` всегда, owner только bootstrap CLI) -> Users + AuthTokens |
+| `auth/` | `POST /auth/login` | Логин (dummy-verify против тайминга, `has_usable_password` проверка) -> AuthTokens |
+| `auth/` | `POST /auth/logout` | Отзыв текущего токена (`revoked_at`) |
+| `auth/` | `POST /auth/telegram/code` | Выдача одноразового кода линковки |
 | `health.py` | `GET /health` | Проверка всех внешних сервисов (PG, Redis, RabbitMQ, Qdrant) |
 | `deps.py` | `get_current_user` | Dependency: sha256 токена из `Authorization: Bearer` -> поиск в `AuthTokens` -> возврат `Users` |
 
@@ -444,7 +449,7 @@ quick-tunnel и полученный URL используется в `set_webhoo
 
 | Компонент | Очередь | Фильтр | Назначение |
 |---|---|---|---|
-| `TG Sender` | `outgoing_messages` | `channel == "telegram"` | Отправка через Telegram Bot API (`aiogram.Bot.send_message`) |
+| `TG Sender` | `outgoing_messages` + `typing_events` | `channel == "telegram"` | `send_message` + `send_chat_action typing` loop 4с (ADR-17, `app/chats/typing.py`) |
 | `Browser Sender` | `outgoing_messages` | `channel == "browser"` | Отправка через WebSocket (`WebSocketManager.send_to_user`) |
 | `DS Sender` | `outgoing_messages` | `channel == "discord"` | Отправка через Discord API (после MVP) |
 | `CLI Sender` | `outgoing_messages` | `channel == "cli"` | Отправка через CLI (после MVP) |
@@ -525,37 +530,44 @@ class ProviderRegistry:
     def __init__(self, settings: SettingsSchema): ...
     def register(self, name: str, factory: Callable, enabled: bool = True): ...
     def get(self, name: str) -> LLMProvider: ...          # lazy init
-    def close_all(self): ...
+    async def close_all(self): ...  # await gather
 
 
 class LLMRouter:
     def __init__(self, registry: ProviderRegistry): ...
-    def _chain(self, role: Role) -> list[tuple[LLMProvider, str]]: ...
+    def _chain(self, role: Role) -> list[tuple[str, str]]: ...  # (provider_name, model)
     async def generate_with_fallback(
         self, role: Role, messages: list[ChatMessage]
-    ) -> LLMResponse: ...
+    ) -> LLMResponse: ...  # resolve per-candidate, skip bad config
     async def embed(self, texts: list[str]) -> list[list[float]]: ...
     async def close(self) -> None: ...
 ```
 
-**Конфигурация цепочек (`settings.LLM_PROVIDER_CHAINS`):**
+**Конфигурация цепочек (`settings.LLM_PROVIDER_CHAINS`, 3 уровня приоритета):**
 
 ```python
 LLM_PROVIDER_CHAINS = {
     "dialogue": [
         {"provider": "gemini_cloudflare", "models": "gemini-3.5-flash-lite,gemini-3.1-flash-lite"},
-        {"provider": "openrouter", "models": "nvidia/nemotron-3-ultra-550b-a55b:free,..."},
+        {"provider": "openrouter", "models": "nvidia/nemotron-3-ultra-550b-a55b:free,nvidia/nemotron-3-super-120b-a12b:free"},
+        {"provider": "openrouter", "models": "anthropic/claude-3.5-haiku:free,meta-llama/llama-3.1-8b-instruct:free"},
     ],
     "cs": [
         {"provider": "gemini_cloudflare", "models": "gemini-3.6-flash"},
-        {"provider": "openrouter", "models": "nvidia/nemotron-3-ultra-550b-a55b:free,..."},
+        {"provider": "openrouter", "models": "nvidia/nemotron-3-ultra-550b-a55b:free,nvidia/nemotron-3-super-120b-a12b:free"},
+        {"provider": "openrouter", "models": "anthropic/claude-3.5-haiku:free"},
     ],
     "bp": [
-        {"provider": "openrouter", "models": "google/gemma-4-31b-it:free,..."},
-        {"provider": "openrouter", "models": "nvidia/nemotron-3-ultra-550b-a55b:free,..."},
+        {"provider": "openrouter", "models": "google/gemma-4-31b-it:free,google/gemma-4-26b-a4b-it:free"},
+        {"provider": "openrouter", "models": "nvidia/nemotron-3-ultra-550b-a55b:free,nvidia/nemotron-3-super-120b-a12b:free"},
+        {"provider": "openrouter", "models": "qwen/qwen-2.5-coder-32b-instruct:free"},
     ],
     "vs": [
         {"provider": "gemini_cloudflare", "models": "gemini-embedding-2"},
+    ],
+    "media": [
+        {"provider": "gemini_cloudflare", "models": "gemini-3.5-flash-lite", "modalities": "image,audio,video"},
+        {"provider": "openrouter", "models": "google/gemini-2.0-flash-exp:free", "modalities": "image"},
     ],
 }
 ```
@@ -624,11 +636,12 @@ class SkillRegistry:
 | Колонка | Тип | Ограничения | Назначение |
 |---|---|---|---|
 | `user_id` | `UUID` | PK, default uuid4 | Внутренний идентификатор |
-| `telegram_id` | `BigInteger` | nullable | Внешний ID от Telegram |
-| `discord_id` | `BigInteger` | nullable | Внешний ID от Discord |
-| `username` | `String(20)` | NOT NULL | Логин для browser/cli |
+| `telegram_id` | `BigInteger` | nullable, unique | Внешний ID от Telegram |
+| `discord_id` | `BigInteger` | nullable, unique | Внешний ID от Discord |
+| `username` | `String(20)` | NOT NULL, unique | Логин для browser/cli |
 | `passwd_hash` | `String` | NOT NULL | Argon2id хэш пароля |
-| `role` | `String` | Literal["owner", "user"] | Роль в системе |
+| `has_usable_password` | `Boolean` | default true, server_default true | False для auto-TG (без пароля) |
+| `role` | `String` | `CHECK` owner/user, `one_owner` partial unique | Роль, только 1 owner (ADR-16) |
 | `settings` | `JSONB` | default={} | Настройки пользователя |
 | `created_at` | `DateTime(tz)` | server_default=now() | Дата создания |
 
@@ -667,7 +680,7 @@ class SkillRegistry:
 | `status` | `String` | NOT NULL | "success", "error", "denied" |
 | `created_at` | `DateTime(tz)` | server_default=now() | Когда |
 
-### Messages (архив, ADR-14)
+### Messages (архив, ADR-14, ADR-17)
 
 | Колонка | Тип | Ограничения | Назначение |
 |---|---|---|---|
@@ -677,9 +690,10 @@ class SkillRegistry:
 | `channel` | `String` | NOT NULL | telegram / browser / discord / cli |
 | `external_id` | `BigInteger` | nullable | ID сообщения в канале |
 | `text` | `Text` | NOT NULL | Текст сообщения |
+| `source_kind` | `String(8)` | default text, server_default text | text/photo/video/voice/audio (ADR-17) |
 | `created_at` | `DateTime(tz)` | server_default=now() | Когда |
 
-Индекс: `(user_id, created_at)`. Consolidation архив не удаляет.
+Индекс: `(user_id, created_at)`. Consolidation архив не удаляет. `source_kind` отличает пересказ медиа от цитаты.
 
 ### FeedSources (источники парсера, Этап 7)
 
@@ -778,6 +792,26 @@ class SkillRegistry:
 - **Обоснование:** NACK с requeue создаёт горячий цикл (сообщение мгновенно возвращается тому же занятому воркеру). Единый механизм с ADR-13. Потеря после 5 неудач фиксируется в DLQ для ручного разбора
 - **Статус:** Принято
 
+### ADR-16: Owner только через bootstrap CLI (замена OWNER_USERNAME)
+- **Контекст:** Открытая `POST /auth/register` + `OWNER_USERNAME` из публичного репо = TOCTOU гонка `SELECT count(*)` и hijacking первого owner
+- **Решение:** `OWNER_USERNAME` упразднён. Owner создаётся только `uv run python -m app.brain.bootstrap --username X --password Y` под `pg_advisory_xact_lock` + `one_owner` partial unique index `WHERE role='owner'` + `CHECK role IN ('owner','user')`. `POST /auth/register` всегда `role=user`
+- **Статус:** Принято
+
+### ADR-17: Typing индикатор вне Worker'а (канал-агностик)
+- **Контекст:** Статус «печатает» — чисто UX канала (Telegram `send_chat_action`, Browser WS), не должен делать Worker зависимым от `aiogram`
+- **Решение:** Worker публикует `TypingEvent{user_id, channel, start/stop}` в `typing_events` (routing `typing`) via `MessagePublisher.publish_typing`. `TGSender` (и будущие senders) consume `typing_events` и делегируют `app/chats/typing.py: TelegramTypingIndicator` (loop 4с) / `NoOp`. Отдельный интерфейс `TypingIndicator` позволяет добавить `DiscordTypingIndicator`, `BrowserTypingIndicator` без правки Worker
+- **Статус:** Принято
+
+### ADR-18: Строгий конфиг `extra=forbid`
+- **Контекст:** `extra="allow"` тихо проглатывает опечатки (`RABBIT_MQ_HOST`)
+- **Решение:** `extra="forbid"` — неизвестные ключи в `.env`/env валят старт (громкий фейл). Legacy `LLM_*` оставлены как deprecated `Field(default=None)` чтобы старый `.env` не падал, но новые опечатки ловятся
+- **Статус:** Принято
+
+### ADR-19: 3-уровневые LLM цепочки + `media` роль
+- **Контекст:** 2 уровня fallback недостаточно при деградации free-моделей; медиа (фото/видео/аудио) требует отдельной цепочки
+- **Решение:** Каждая роль теперь 3 уровня: `gemini_cloudflare` -> `openrouter nemotron` -> `openrouter haiku/llama/qwen` (разные под диалог/cs/bp). Новая роль `media` с `modalities` фильтрацией, `Messages.source_kind` отличает пересказ медиа от цитаты
+- **Статус:** Принято
+
 ---
 
 ## 8. Конфигурация (Settings)
@@ -813,36 +847,36 @@ class SettingsSchema(BaseSettings):
     # --- LLM ---
     GEMINI_API_KEY: str = ""
     OPENROUTER_API_KEY: str = ""
-    GEMINI_CLOUDFLARE_URL: str = "https://geminifix.shayden.workers.dev/"
+    GEMINI_CLOUDFLARE_URL: str = ""  # must be set if gemini_cloudflare in chain
     GEMINI_ENABLED: bool = False
 
-    # LLM provider chains (config-driven fallback chains).
-    # Each role -> list of {"provider": "...", "models": "..."}.
+    # LLM provider chains (3-level priority, ADR-19).
     LLM_PROVIDER_CHAINS: dict = {
         "dialogue": [
             {"provider": "gemini_cloudflare", "models": "gemini-3.5-flash-lite,gemini-3.1-flash-lite"},
-            {"provider": "openrouter", "models": "nvidia/nemotron-3-ultra-550b-a55b:free,..."},
+            {"provider": "openrouter", "models": "nvidia/nemotron-3-ultra-550b-a55b:free,nvidia/nemotron-3-super-120b-a12b:free"},
+            {"provider": "openrouter", "models": "anthropic/claude-3.5-haiku:free,meta-llama/llama-3.1-8b-instruct:free"},
         ],
         "cs": [
             {"provider": "gemini_cloudflare", "models": "gemini-3.6-flash"},
-            {"provider": "openrouter", "models": "nvidia/nemotron-3-ultra-550b-a55b:free,..."},
+            {"provider": "openrouter", "models": "nvidia/nemotron-3-ultra-550b-a55b:free,nvidia/nemotron-3-super-120b-a12b:free"},
+            {"provider": "openrouter", "models": "anthropic/claude-3.5-haiku:free"},
         ],
         "bp": [
-            {"provider": "openrouter", "models": "google/gemma-4-31b-it:free,..."},
-            {"provider": "openrouter", "models": "nvidia/nemotron-3-ultra-550b-a55b:free,..."},
+            {"provider": "openrouter", "models": "google/gemma-4-31b-it:free,google/gemma-4-26b-a4b-it:free"},
+            {"provider": "openrouter", "models": "nvidia/nemotron-3-ultra-550b-a55b:free,nvidia/nemotron-3-super-120b-a12b:free"},
+            {"provider": "openrouter", "models": "qwen/qwen-2.5-coder-32b-instruct:free"},
         ],
         "vs": [
             {"provider": "gemini_cloudflare", "models": "gemini-embedding-2"},
         ],
+        "media": [
+            {"provider": "gemini_cloudflare", "models": "gemini-3.5-flash-lite", "modalities": "image,audio,video"},
+            {"provider": "openrouter", "models": "google/gemini-2.0-flash-exp:free", "modalities": "image"},
+        ],
     }
 
-    # Legacy fields (kept for backward compatibility).
-    LLM_DIALOGUE_GEMINI: str = "gemini-3.5-flash-lite,gemini-3.1-flash-lite"
-    LLM_CS_GEMINI: str = "gemini-3.6-flash"
-    LLM_BP_OPENROUTER: str = "google/gemma-4-31b-it:free,google/gemma-4-26b-a4b-it:free"
-    LLM_FALLBACK_OPENROUTER: str = "nvidia/nemotron-3-ultra-550b-a55b:free,nvidia/nemotron-3-super-120b-a12b:free"
-    LLM_EMBED_MODEL: str = "gemini-embedding-2"
-    LLM_HISTORY_LIMIT: int = 20
+    LLM_HISTORY_LIMIT: int = 20  # deprecated legacy removed except this
 
     # --- Telegram ---
     TELEGRAM_BOT_TOKEN: str = ""
@@ -860,13 +894,6 @@ class SettingsSchema(BaseSettings):
     # --- Skills ---
     SYSTEM_SKILLS_ENABLED: bool = False
     SANDBOX_ENABLED: bool = True
-
-    # --- Owner ---
-    OWNER_USERNAME: str = (
-        ""  # Первый пользователь с таким username получает role=owner.
-        # В модели Users нет поля email — вариант OWNER_EMAIL требует
-        # миграции и отклонён
-    )
 
     @computed_field
     @property
@@ -899,7 +926,25 @@ class SettingsSchema(BaseSettings):
 
 ---
 
-## 10. Тестирование
+## 9. Стиль кода (Code Style)
+
+Обязателен для всех PR, проверяется `ruff` в CI.
+
+| Правило | Значение | Где зафиксировано |
+|---|---|---|
+| Линтер/форматтер | `ruff` `line-length 79`, `target-version py313`, `select E,W,F,I,UP,B,ASYNC,C4,SIM,RUF` | `pyproject.toml:46` |
+| Кавычки/отступы | `double`, 4 spaces, no tabs | `ruff.format` |
+| Docstring | Google-style, EN, `Args/Returns/Raises` на каждой публичной функции | `app/core/logger.py` пример |
+| Логи | `LoggerMixin._lg` + `f-string`, уровни `DEBUG` поток, `INFO` юзер, `WARN` непредвиденное, `ERROR` деградация | `app/core/logger_config.py` |
+| Типы | `TypedDict`/`Literal` для `Role/Channel/source_kind`, `Mapped` для моделей | `app/brain/models` |
+| Импорты | `ruff isort` (`I`), внешние через фасады `app/core`, `app/common` | `app/brain/memory/__init__.py` |
+| Композиция > наследование | `RedisClient` обёртка, `TypingIndicator` ABC | `app/brain/memory/short/redis.py:104` |
+| Конфиг | `extra="forbid"` — опечатка валит старт (громкий фейл) | `app/core/config.py:194` |
+| Язык | Код EN, доки RU, кириллица в `.py` только в `ME.md/RULES.md` | `R2` |
+
+---
+
+## 10. Тестирование (обновлено R4)
 
 | Уровень | Инструмент | Что тестируем |
 |---|---|---|

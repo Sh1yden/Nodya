@@ -48,9 +48,11 @@ cp .env.example .env
 Отредактируйте `.env`, указав свои ключи:
 - `TELEGRAM_BOT_TOKEN` — токен Telegram-бота
 - `TELEGRAM_WEBHOOK_SECRET` — секрет вебхука (любая длинная строка)
-- `GEMINI_API_KEY` — ключ Google AI Studio (используется через Cloudflare Worker)
-- `GEMINI_CLOUDFLARE_URL` — URL Cloudflare Worker (по умолчанию `https://geminifix.shayden.workers.dev/`)
-- `OWNER_USERNAME` — username владельца
+- `GEMINI_API_KEY` — ключ Google AI Studio
+- `GEMINI_CLOUDFLARE_URL` — **обязателен**, URL твоего Cloudflare Worker (без дефолта, не используй чужой)
+- `OPENROUTER_API_KEY` — ключ OpenRouter для fallback
+- `TELEGRAM_WEBHOOK_SECRET` — уже выше
+- Owner создаётся отдельно: `uv run python -m app.brain.bootstrap --username <u> --password <p>` (не через `.env`)
 
 Про `TELEGRAM_WEBHOOK_URL`:
 - **Пусто** (локальная разработка) — приложение само поднимет
@@ -69,6 +71,9 @@ uv sync
 
 # Миграции
 alembic upgrade head
+
+# Создать owner (один раз, после первого деплоя)
+uv run python -m app.brain.bootstrap --username Shayden --password <pwd>
 
 # Запуск (FastAPI + Worker в одном процессе)
 uv run uvicorn app.main:app --reload
@@ -145,7 +150,10 @@ ruff check .
 ruff format .
 
 # Тесты
-pytest
+pytest -m "not integration"  # unit, без БД
+pytest                      # все (нужен docker-compose up postgres/redis)
+
+# Стиль кода — см. docs/ARCHITECTURE_FULL.md §9
 ```
 
 ---

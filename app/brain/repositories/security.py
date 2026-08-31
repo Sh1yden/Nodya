@@ -5,13 +5,18 @@ plain SHA-256 — a high-entropy random string gains nothing from a
 slow KDF (ADR-3).
 """
 
+import contextlib
 import hashlib
 import secrets
 
 from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
+from argon2.exceptions import Argon2Error, InvalidHashError
 
 _ph = PasswordHasher()
+
+# Constant dummy hash for timing-safe dummy verification
+# (prevents username enumeration via response time).
+_DUMMY_HASH = _ph.hash("dummy-constant-for-timing-attack-mitigation")
 
 
 def hash_password(password: str) -> str:
@@ -34,13 +39,26 @@ def verify_password(password: str, password_hash: str) -> bool:
         password_hash: Stored argon2id hash.
 
     Returns:
-        True on match; False on mismatch (other errors propagate).
+        True on match; False on mismatch or invalid hash format.
     """
     try:
         _ph.verify(password_hash, password)
         return True
-    except VerifyMismatchError:
+    except (Argon2Error, InvalidHashError):
         return False
+
+
+def verify_password_dummy(password: str) -> None:
+    """Run a dummy verification to equalize timing.
+
+    Used when user is not found to prevent timing-based
+    username enumeration (always takes ~argon2 time).
+
+    Args:
+        password: Candidate plaintext to verify against dummy.
+    """
+    with contextlib.suppress(Argon2Error, InvalidHashError):
+        _ph.verify(_DUMMY_HASH, password)
 
 
 def generate_token() -> str:

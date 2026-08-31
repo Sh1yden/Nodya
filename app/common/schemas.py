@@ -45,3 +45,17 @@ class ScheduledEnvelope(BaseModel):
     incoming: list[IncomingMessage] | None = None
     outgoing: OutgoingMessage | None = None
     retry_count: int = 0
+
+
+class TypingEvent(BaseModel):
+    """Channel typing indicator event (ADR-17).
+
+    Published by Worker while generating, consumed by channel
+    senders to show ``typing`` status. Separate routing key from
+    outgoing to keep generation and delivery decoupled.
+    """
+
+    user_id: UUID
+    channel: Channel
+    action: Literal["start", "stop"]
+    chat_id: int | None = None

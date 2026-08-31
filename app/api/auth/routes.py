@@ -1,8 +1,8 @@
-"""Authentication: register / login / account deletion.
+"""Authentication: register / login / logout / account deletion.
 
 Passwords are hashed with argon2id, opaque tokens with SHA-256
-(ADR-3). Owner role: the first registered user of a deployment or a
-matching OWNER_USERNAME (amendment 8).
+(ADR-3). Owner is created only via bootstrap CLI (ADR-16), public
+registration always creates ``role=user``.
 """
 
 from datetime import UTC, datetime
@@ -17,7 +17,7 @@ from fastapi import (
     Response,
     status,
 )
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
@@ -30,8 +30,9 @@ from app.brain.repositories.security import (
     hash_password,
     hash_token,
     verify_password,
+    verify_password_dummy,
 )
-from app.core import get_logger, settings
+from app.core import get_logger
 
 from .schemas import (
     LinkCodeResponse,
@@ -83,6 +84,7 @@ async def register(
         user_id=uuid4(),
         username=payload.username,
         passwd_hash=hash_password(payload.password),
+        has_usable_password=True,
         role=await _resolve_role(session, payload.username),
     )
     token_row, raw_token = _new_token_row(user.user_id, payload.client_type)
@@ -113,7 +115,21 @@ async def login(
     """
     repo = UsersRepo(session)
     user = await repo.get_by_field("username", payload.username)
-    if user is None or not verify_password(payload.password, user.passwd_hash):
+    if user is None:
+        verify_password_dummy(payload.password)
+        logger.warning(f"Failed login for '{payload.username}'.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid credentials",
+        )
+    # Auto-registered TG users have unusable password (None=default True).
+    if getattr(user, "has_usable_password", True) is False:
+        logger.warning(f"Failed login for '{payload.username}'.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid credentials",
+        )
+    if not verify_password(payload.password, user.passwd_hash):
         logger.warning(f"Failed login for '{payload.username}'.")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -149,6 +165,43 @@ async def create_telegram_link_code(
     return LinkCodeResponse(code=code, expires_in=LINK_TTL_SECONDS)
 
 
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(
+    current_user: _CurrentUserDep,
+    session: _SessionDep,
+    request: Request,
+) -> Response:
+    """Revoke the current bearer token.
+
+    Args:
+        current_user: Authenticated user.
+        session: Database session.
+        request: Request with Authorization header.
+
+    Returns:
+        Empty 204 response.
+    """
+    from app.brain.repositories.security import hash_token
+
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header.removeprefix("Bearer ").strip()
+    if token:
+        token_hash = hash_token(token)
+        result = await session.execute(
+            select(AuthTokens).where(
+                AuthTokens.user_id == current_user.user_id,
+                AuthTokens.token_hash == token_hash,
+                AuthTokens.revoked_at.is_(None),
+            )
+        )
+        token_row = result.scalar_one_or_none()
+        if token_row is not None:
+            token_row.revoked_at = datetime.now(UTC)
+            await session.commit()
+            logger.info(f"Token revoked for user_id={current_user.user_id}.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_me(
     current_user: _CurrentUserDep,
@@ -175,17 +228,18 @@ async def delete_me(
 async def _resolve_role(session: AsyncSession, username: str) -> str:
     """Resolve the role for a new registration.
 
+    Owner is only created via bootstrap CLI (ADR-16); public
+    registration always yields ``user`` to avoid TOCTOU race and
+    username hijacking via public OWNER_USERNAME.
+
     Args:
-        session: Database session.
+        session: Database session (unused, kept for signature).
         username: Username being registered.
 
     Returns:
-        "owner" for the first deployment user or OWNER_USERNAME match,
-        otherwise "user".
+        Always ``"user"``.
     """
-    total = await session.scalar(select(func.count()).select_from(Users))
-    if total == 0 or username == settings.OWNER_USERNAME:
-        return "owner"
+    _ = session, username
     return "user"
 
 

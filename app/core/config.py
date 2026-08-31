@@ -24,11 +24,6 @@ class SettingsSchema(BaseSettings):
         description="Run sandboxed skills inside a Docker container.",
     )
 
-    # Owner
-    OWNER_USERNAME: str = Field(
-        default="Shayden", description="Owner username."
-    )
-
     # PostgreSQL
     POSTGRES_HOST: str = Field(default="localhost")
     POSTGRES_ASYNCPG: str = Field(default="asyncpg")
@@ -68,13 +63,28 @@ class SettingsSchema(BaseSettings):
     GEMINI_API_KEY: str = Field(default="")
     OPENROUTER_API_KEY: str = Field(default="")
     GEMINI_CLOUDFLARE_URL: str = Field(
-        default="https://geminifix.shayden.workers.dev/"
+        default="",
+        description=(
+            "Cloudflare Worker URL proxying Gemini API. "
+            "Self-hosters must set their own worker; "
+            "empty fails fast if gemini_cloudflare is in chain."
+        ),
     )
     GEMINI_ENABLED: bool = Field(default=False)
 
-    # LLM provider chains (new configurable format).
+    # Deprecated (kept for backward compat with existing .env, not used).
+    OWNER_USERNAME: str | None = Field(
+        default=None, description="Deprecated: owner via bootstrap CLI."
+    )
+    LLM_DIALOGUE_GEMINI: str | None = Field(default=None)
+    LLM_CS_GEMINI: str | None = Field(default=None)
+    LLM_BP_OPENROUTER: str | None = Field(default=None)
+    LLM_FALLBACK_OPENROUTER: str | None = Field(default=None)
+    LLM_EMBED_MODEL: str | None = Field(default=None)
+
+    # LLM provider chains (priority fallback).
     # Each role maps to a list of {"provider": "...", "models": "..."}.
-    # Provider names must match registry registrations.
+    # Provider names must match registry registrations; order is priority.
     LLM_PROVIDER_CHAINS: dict = Field(
         default={
             "dialogue": [
@@ -89,6 +99,13 @@ class SettingsSchema(BaseSettings):
                         "nvidia/nemotron-3-super-120b-a12b:free"
                     ),
                 },
+                {
+                    "provider": "openrouter",
+                    "models": (
+                        "anthropic/claude-3.5-haiku:free,"
+                        "meta-llama/llama-3.1-8b-instruct:free"
+                    ),
+                },
             ],
             "cs": [
                 {
@@ -101,6 +118,10 @@ class SettingsSchema(BaseSettings):
                         "nvidia/nemotron-3-ultra-550b-a55b:free,"
                         "nvidia/nemotron-3-super-120b-a12b:free"
                     ),
+                },
+                {
+                    "provider": "openrouter",
+                    "models": "anthropic/claude-3.5-haiku:free",
                 },
             ],
             "bp": [
@@ -118,6 +139,10 @@ class SettingsSchema(BaseSettings):
                         "nvidia/nemotron-3-super-120b-a12b:free"
                     ),
                 },
+                {
+                    "provider": "openrouter",
+                    "models": "qwen/qwen-2.5-coder-32b-instruct:free",
+                },
             ],
             "vs": [
                 {
@@ -128,21 +153,6 @@ class SettingsSchema(BaseSettings):
         }
     )
 
-    # Legacy fields (kept for backward compatibility / gradual migration).
-    LLM_DIALOGUE_GEMINI: str = Field(
-        default="gemini-3.5-flash-lite,gemini-3.1-flash-lite"
-    )
-    LLM_CS_GEMINI: str = Field(default="gemini-3.6-flash")
-    LLM_BP_OPENROUTER: str = Field(
-        default="google/gemma-4-31b-it:free,google/gemma-4-26b-a4b-it:free"
-    )
-    LLM_FALLBACK_OPENROUTER: str = Field(
-        default=(
-            "nvidia/nemotron-3-ultra-550b-a55b:free,"
-            "nvidia/nemotron-3-super-120b-a12b:free"
-        )
-    )
-    LLM_EMBED_MODEL: str = Field(default="gemini-embedding-2")
     LLM_HISTORY_LIMIT: int = Field(default=20)
 
     # Telegram
@@ -196,7 +206,7 @@ class SettingsSchema(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        extra="allow",
+        extra="forbid",
         case_sensitive=True,
     )
 

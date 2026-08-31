@@ -25,9 +25,10 @@ from sqlalchemy import select
 
 from app.brain.llm_choice import (
     ChatMessage,
-    GeminiProvider,
+    GeminiCloudflareProvider,
     LLMRouter,
     OpenRouterProvider,
+    ProviderRegistry,
 )
 from app.brain.memory.long import AsyncSessionLocal
 from app.brain.memory.short import ContextMessage, RedisClient
@@ -305,10 +306,17 @@ async def _cli_main() -> None:
         uv run python -m app.brain.memory.consolidation
     """
     redis_client = RedisClient(settings.redis_url)
-    router = LLMRouter(
-        gemini=GeminiProvider(settings.GEMINI_API_KEY),
-        openrouter=OpenRouterProvider(settings.OPENROUTER_API_KEY),
+    registry = ProviderRegistry(settings)
+    registry.register(
+        "gemini_cloudflare", GeminiCloudflareProvider, enabled=True
     )
+    registry.register("openrouter", OpenRouterProvider, enabled=True)
+    if settings.GEMINI_ENABLED:
+        # Lazy import to keep default path free of google-genai.
+        from app.brain.llm_choice.gemini import GeminiProvider
+
+        registry.register("gemini", GeminiProvider, enabled=True)
+    router = LLMRouter(registry=registry)
     vectors = VectorMemory(
         host=settings.QDRANT_HOST,
         port=settings.QDRANT_PORT,

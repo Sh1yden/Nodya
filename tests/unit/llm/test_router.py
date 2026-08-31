@@ -83,9 +83,9 @@ class TestLLMRouterChain:
 
         chain = router._chain("dialogue")
         assert len(chain) == 2
-        assert chain[0][0] is gemini
+        assert chain[0][0] == "gemini_cloudflare"
         assert chain[0][1] == "gemini-flash"
-        assert chain[1][0] is openrouter
+        assert chain[1][0] == "openrouter"
         assert chain[1][1] == "nemotron-free"
 
     @patch("app.brain.llm_choice.router.settings")
@@ -107,9 +107,9 @@ class TestLLMRouterChain:
 
         chain = router._chain("bp")
         assert len(chain) == 2
-        assert chain[0][0] is openrouter
+        assert chain[0][0] == "openrouter"
         assert chain[0][1] == "gemma-free"
-        assert chain[1][0] is openrouter
+        assert chain[1][0] == "openrouter"
         assert chain[1][1] == "nemotron-free"
 
     @patch("app.brain.llm_choice.router.settings")
@@ -127,7 +127,7 @@ class TestLLMRouterChain:
 
         chain = router._chain("vs")
         assert len(chain) == 1
-        assert chain[0][0] is gemini
+        assert chain[0][0] == "gemini_cloudflare"
         assert chain[0][1] == "gemini-embed"
 
 

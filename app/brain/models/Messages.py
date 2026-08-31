@@ -45,6 +45,14 @@ class Messages(Base):
     channel: Mapped[str] = mapped_column(String(16), nullable=False)
     external_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     text: Mapped[str] = mapped_column(Text, nullable=False)
+    source_kind: Mapped[
+        Literal["text", "photo", "video", "voice", "audio"]
+    ] = mapped_column(
+        String(8),
+        nullable=False,
+        default="text",
+        server_default="text",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

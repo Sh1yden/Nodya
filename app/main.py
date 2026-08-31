@@ -159,6 +159,14 @@ async def _fail_fast() -> None:
     if not settings.OPENROUTER_API_KEY:
         _lg.critical("OPENROUTER_API_KEY is empty.")
         raise RuntimeError("OPENROUTER_API_KEY is empty.")
+    uses_gemini_cf = any(
+        item.get("provider") == "gemini_cloudflare"
+        for chain in settings.LLM_PROVIDER_CHAINS.values()
+        for item in chain
+    )
+    if uses_gemini_cf and not settings.GEMINI_CLOUDFLARE_URL:
+        _lg.critical("GEMINI_CLOUDFLARE_URL is empty but required.")
+        raise RuntimeError("GEMINI_CLOUDFLARE_URL is empty but required.")
 
     redis_probe = RedisClient(settings.redis_url)
     try:

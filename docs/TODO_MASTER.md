@@ -18,7 +18,7 @@
 | 5 | Webhook Telegram | Обязательная проверка заголовка `X-Telegram-Bot-Api-Secret-Token` (`secrets.compare_digest`); секрет в `set_webhook` и в Settings |
 | 6 | Новая таблица `messages` | Сырой архив входящих/исходящих; consolidation НЕ чистит. Защита от потери истории |
 | 7 | Новая таблица `feed_sources` | Источники RSS/TG фонового парсера (Этап 7) |
-| 8 | OWNER | `OWNER_USERNAME` (в модели `Users` нет поля email — вариант с OWNER_EMAIL невозможен без миграции) |
+| 8 | OWNER | `OWNER_USERNAME` **упразднён (R4)**: owner создаётся только `uv run python -m app.brain.bootstrap --username X --password Y` с `pg_advisory_xact_lock` и `one_owner` partial index (ADR-16). Публичная `POST /auth/register` всегда `role=user` — закрыта TOCTOU-гонка и hijacking публичного дефолта |
 | 9 | Туннели для dev | Без `TELEGRAM_WEBHOOK_URL` локально поднимается cloudflared quick-tunnel. Tuna отклонена (RU-сегмент, обход не тянет). Внутри Docker бинарника нет — там обязателен явный URL. Stdout туннеля дренируется фоновым потоком (иначе пайп переполняется и туннель замирает) |
 
 Порядок реализации: E(docs) → B(инфра) → C(вертикальный срез TG→эхо) → D1..D5 (бывшие Этапы 3–9).
@@ -41,8 +41,9 @@
 | 2026-08-26 | L1 | Связывание Telegram↔аккаунт: POST /auth/telegram/code (Bearer, одноразовый код GETDEL, TTL 10 мин, алфавит без 0/O/1/I); Worker перехватывает /link до debounce/LLM; мёрж двойника = UPDATE messages/hard_facts → освобождение tg_id → delete dup (порядок против unique-конфликта) → RENAME Redis-ключей → reassign Qdrant payload (фильтр через points=Filter — сигнатура клиента); HTTPBearer в deps → кнопка Authorize в Swagger; частичные сбои переноса репортятся честно. Мёрж владельца выполнен и проверен живьём (47 сообщений, факт, саммари, точка Qdrant под owner) |
 | 2026-08-27 | D5 | Тесты готовы. |
 | 2026-08-30 | R3 | Рефакторинг LLM-провайдеров: добавлен ProviderRegistry (ленивая инициализация, конфиг-цепочки), заменён прямой Gemini на GeminiCloudflareProvider (httpx → Cloudflare Worker https://geminifix.shayden.workers.dev/), старый GeminiProvider отключён через GEMINI_ENABLED=false. Роутер теперь строит цепочки из настроек LLM_PROVIDER_CHAINS. Обновлены тесты и доки. |
+| 2026-09-01 | R4 | Безопасность и харднинг: `verify_password` ловит `Argon2Error` (фикс 500 для tg-юзеров) + dummy-hash против тайминга, `has_usable_password` (миграция 03a6ff552596) и `POST /auth/logout` (`revoked_at`), bootstrap-CLI `app.brain.bootstrap` с `pg_advisory_xact_lock` и `one_owner` partial index (ADR-16, замена OWNER_USERNAME гонки), `ProviderRegistry.close_all` async + `_chain` lazy resolve, `TGSender` ловит `TelegramAPIError` без зависания, `Messages.source_kind` (ADR-17 media фундамент), `GEMINI_CLOUDFLARE_URL` без дефолта на личный воркер + `extra=forbid`, `Dockerfile USER app` + `healthcheck`, `docker-compose` порты на `127.0.0.1`, `Base` naming_convention фикс `abbdbc96f127 downgrade`, 3-уровневые LLM цепочки (`haiku`, `llama`, `qwen`) + `media` роль, `TypingEvent` + `app/chats/typing.py` канал-агностик статус «печатает» через `typing_events` очередь (не в Worker) |
 
-Следующий шаг: D4-проактивность (70/20/10, RSS+feed_sources) или browser-канал; затем D5 тесты.
+Следующий шаг: D4-проактивность (70/20/10, RSS+feed_sources) или browser-канал; медиа пайплайн `media` роль.
 ---
 
 ## **Этап 0: - [x] Фикс того, что уже написано**
@@ -890,6 +891,43 @@ async def retry_with_backoff(
 - `docs/ARCHITECTURE_FULL.md` — §5.4, добавление схемы реестра
 - `docs/README_PROJECT.md` — технологии + env
 - `docs/TODO_MASTER.md` — этот инкремент
+
+---
+
+## Инкремент R4: Харднинг и typing (2026-09-01)
+
+### R4.1 - [x] Безопасность auth
+- `app/brain/repositories/security.py` — `Argon2Error` + dummy-hash против enumeration
+- `app/brain/models/Users.py` + миграция `03a6ff552596` — `has_usable_password`, `one_owner` index, `CHECK role`
+- `app/brain/models/Messages.py` + та же миграция — `source_kind` (`text`/`photo`/`video`/...)
+- `app/worker.py` — auto-tg юзеры `hash_password(uuid)` + `has_usable_password=False`
+- `app/api/auth/routes.py` — `_resolve_role` всегда `user`, `POST /auth/logout` ставит `revoked_at`, `login` dummy-verify
+- `app/brain/bootstrap.py` — CLI создания owner с advisory lock
+
+### R4.2 - [x] LLM слой
+- `app/brain/llm_choice/registry.py` — `async close_all` + `await gather`
+- `app/brain/llm_choice/router.py` — `_chain` хранит `provider_name`, resolve внутри цикла, `embed` fallback
+- `app/core/config.py` — удалены 4 legacy `LLM_*`, `GEMINI_CLOUDFLARE_URL` без дефолта + `extra=forbid`, 3-уровневые цепочки (`haiku`, `llama`, `qwen`) + `media` роль
+- `app/brain/llm_choice/base.py` — `Role` + `media`
+
+### R4.3 - [x] Инфраструктура
+- `Dockerfile` — `USER app` + `HEALTHCHECK` на `/health`
+- `docker-compose.yml` — все инфра-порты `127.0.0.1:`, `app` healthcheck
+- `app/brain/models/Base.py` — `naming_convention` + фикс `abbdbc96f127 downgrade`
+- `app/brain/memory/consolidation.py` — `_cli_main` через `ProviderRegistry`
+- `app/chats/telegram/sender.py` — `TelegramAPIError` без зависания consumer
+
+### R4.4 - [x] Typing индикатор (ADR-17)
+- `app/common/schemas.py` — `TypingEvent` (`user_id`, `channel`, `action`)
+- `app/common/broker.py` — `ROUTING_TYPING` + `QUEUE_TYPING` + `declare_typing_queue`
+- `app/api/messaging.py` — `publish_typing`
+- `app/chats/typing.py` — `TypingIndicator` ABC + `TelegramTypingIndicator` (loop 4с) + `NoOp`
+- `app/worker.py` — публикует `typing start/stop` вокруг `_run_locked` (и в poller), не трогает `aiogram`
+- `app/chats/telegram/sender.py` — второй consumer `typing_events` -> `TelegramTypingIndicator`
+
+### R4.5 - [x] Доки и стиль
+- `docs/ARCHITECTURE_FULL.md` — §2, §4.1, §5.2, §5.4, §6, ADR-16/17/18/19, §9 Code Style
+- `.env.example` — `GEMINI_CLOUDFLARE_URL` обязателен, legacy удалены
 
 ---
 

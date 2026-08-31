@@ -17,8 +17,10 @@ from app.common import (
     DLX_EXCHANGE,
     ROUTING_INCOMING,
     ROUTING_OUTGOING,
+    ROUTING_TYPING,
     IncomingMessage,
     OutgoingMessage,
+    TypingEvent,
     declare_topology,
 )
 from app.core import LoggerMixin
@@ -72,6 +74,10 @@ class MessagePublisher(LoggerMixin):
     async def publish_outgoing(self, message: OutgoingMessage) -> None:
         """Publish an outgoing message (routing key ``outgoing``)."""
         await self._publish(ROUTING_OUTGOING, message)
+
+    async def publish_typing(self, event: TypingEvent) -> None:
+        """Publish a typing indicator event (routing key ``typing``)."""
+        await self._publish(ROUTING_TYPING, event)
 
     async def publish_dead_letter(self, payload: bytes) -> None:
         """Send a payload straight to the DLQ (for ZSet tasks).

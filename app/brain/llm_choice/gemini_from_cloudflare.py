@@ -8,6 +8,8 @@ The worker at GEMINI_CLOUDFLARE_URL exposes:
 Auth: Authorization: Bearer <GEMINI_API_KEY>
 """
 
+import json
+
 import httpx
 
 from app.core.config import SettingsSchema
@@ -85,8 +87,6 @@ class GeminiCloudflareProvider(LLMProvider):
         for tc in choice.get("tool_calls") or []:
             args = tc["function"]["arguments"]
             if isinstance(args, str):
-                import json
-
                 args = json.loads(args)
             tool_calls.append(
                 {"name": tc["function"]["name"], "arguments": args}

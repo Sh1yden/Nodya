@@ -68,8 +68,8 @@ class ProviderRegistry:
 
         return self._instances[name]
 
-    def close_all(self) -> None:
-        """Close all instantiated providers (call aclose if available)."""
+    async def close_all(self) -> None:
+        """Close all instantiated providers (await aclose if needed)."""
         import asyncio
 
         tasks: list[asyncio.Task] = []
@@ -77,12 +77,11 @@ class ProviderRegistry:
             close = getattr(instance, "close", None)
             if close:
                 if asyncio.iscoroutinefunction(close):
-                    # Fire and forget; shutdown is best-effort
                     tasks.append(asyncio.create_task(close()))
                 else:
                     close()
         if tasks:
-            asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*tasks, return_exceptions=True)
         self._instances.clear()
 
     def is_registered(self, name: str) -> bool:

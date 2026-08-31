@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-Role = Literal["dialogue", "cs", "bp", "vs"]
+Role = Literal["dialogue", "cs", "bp", "vs", "media"]
 
 
 class LLMError(Exception):
