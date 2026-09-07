@@ -14,12 +14,19 @@ Channel = Literal["telegram", "discord", "browser", "cli"]
 
 
 class IncomingMessage(BaseModel):
-    """A user message accepted from a channel."""
+    """A user message accepted from a channel.
+
+    Photo/video/voice carry ``media_*`` + optional caption; ``text``
+    is the caption or plain text.
+    """
 
     user_external_id: str
     channel: Channel
     text: str
     received_at: datetime
+    media_type: Literal["photo", "video", "voice", "audio"] | None = None
+    media_file_id: str | None = None
+    caption: str | None = None
 
 
 class OutgoingMessage(BaseModel):

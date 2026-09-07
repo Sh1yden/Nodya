@@ -1,6 +1,7 @@
 """LLM layer of Nodya: providers, role router, fallback chains (ADR-6)."""
 
 from .base import (
+    ChatContentPart,
     ChatMessage,
     LLMError,
     LLMFatalError,
@@ -17,6 +18,7 @@ from .registry import ProviderDisabledError, ProviderRegistry
 from .router import LLMRouter
 
 __all__ = [
+    "ChatContentPart",
     "ChatMessage",
     "GeminiCloudflareProvider",
     "GeminiProvider",

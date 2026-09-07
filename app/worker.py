@@ -15,6 +15,7 @@ processing every SCHEDULED_POLL_SECONDS (ADR-13).
 """
 
 import asyncio
+import base64
 import re
 import time
 from contextlib import suppress
@@ -35,7 +36,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.api.messaging import MessagePublisher
 from app.brain import load_system_prompt
-from app.brain.llm_choice import ChatMessage, LLMRouter
+from app.brain.llm_choice import ChatContentPart, ChatMessage, LLMRouter
 from app.brain.memory.short import ContextMessage, RedisClient
 from app.brain.memory.vector import VectorMemory
 from app.brain.models import HardFacts, Messages, Users
@@ -488,6 +489,15 @@ class Worker(LoggerMixin):
         history = await self._redis.get_context(user_id, limit=limit)
         batch_text = "\n".join(d.text for d in dtos)
 
+        # Media pre-processing: fetch and describe photo/video/voice
+        media_info = await self._describe_media(dtos)
+        if media_info:
+            # Concatenate caption + description as per best practice
+            if batch_text:
+                batch_text = f"{batch_text}\n{media_info}"
+            else:
+                batch_text = media_info
+
         system_base = load_system_prompt()
         memory_block = await self._long_term_block(user_id, batch_text)
         if memory_block:
@@ -577,6 +587,65 @@ class Worker(LoggerMixin):
         parts += fact_lines + hit_lines
         return "\n".join(parts)
 
+    async def _describe_media(self, dtos: list[IncomingMessage]) -> str | None:
+        """Fetch and describe attached media (photo) via media role.
+
+        Returns:
+            Concatenated description lines like ``[photo: ...]``,
+            or None when no media or all fetches failed.
+        """
+        descriptions: list[str] = []
+        for dto in dtos:
+            if not dto.media_file_id or not dto.media_type:
+                continue
+            # Only photo supported in M1; others gracefully ignored for now
+            if dto.media_type != "photo":
+                descriptions.append(f"[{dto.media_type} not yet supported]")
+                continue
+            try:
+                from app.chats.media_fetcher import fetch_telegram_media
+
+                data, mime = await fetch_telegram_media(dto.media_file_id)
+                b64 = base64.b64encode(data).decode()
+                # Hard 20MB limit already enforced in fetcher
+                self._lg.debug(
+                    f"Media fetched: type={dto.media_type} "
+                    f"size={len(data)} mime={mime}"
+                )
+                chat: list[ChatMessage] = [
+                    ChatMessage(
+                        role="user",
+                        content=[
+                            ChatContentPart(
+                                type="image_url",
+                                inline_data=b64,
+                                mime_type=mime,
+                            ),
+                            ChatContentPart(
+                                type="text",
+                                text=(
+                                    "Describe this image concisely in the "
+                                    "user's language: what is shown, any "
+                                    "text visible, mood."
+                                ),
+                            ),
+                        ],
+                    )
+                ]
+                resp = await self._router.generate_with_fallback("media", chat)
+                desc = (resp.text or "").strip()
+                if not desc:
+                    desc = "image (no description)"
+                descriptions.append(f"[photo: {desc}]")
+            except Exception as exc:
+                self._lg.warning(
+                    f"Media describe failed for {dto.media_file_id}: {exc}"
+                )
+                descriptions.append("[photo: не смог разобрать фото]")
+        if not descriptions:
+            return None
+        return "\n".join(descriptions)
+
     async def _archive_batch(
         self,
         user_id: UUID,
@@ -599,6 +668,7 @@ class Worker(LoggerMixin):
                 direction="incoming",
                 channel=dto.channel,
                 text=dto.text,
+                source_kind=dto.media_type or "text",
             )
             for dto in incoming
         ]

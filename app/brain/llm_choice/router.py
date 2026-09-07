@@ -37,15 +37,19 @@ class LLMRouter(LoggerMixin):
         """
         self._registry = registry
 
-    def _chain(self, role: Role) -> list[tuple[str, str]]:
+    def _chain(
+        self, role: Role, media_type: str | None = None
+    ) -> list[tuple[str, str]]:
         """Build the ordered candidate chain for a role (lazy resolve).
 
         Stores provider names, not instances, so a misconfigured
         provider does not kill the whole chain before the fallback
-        loop starts.
+        loop starts. For ``media`` role, filters by ``modalities``.
 
         Args:
-            role: One of dialogue / cs / bp / vs.
+            role: One of dialogue / cs / bp / vs / media.
+            media_type: For media role, e.g. ``photo`` to filter
+                candidates that support it.
 
         Returns:
             List of (provider_name, model_id) pairs in attempt order.
@@ -53,6 +57,17 @@ class LLMRouter(LoggerMixin):
         chain_config = settings.LLM_PROVIDER_CHAINS.get(role, [])
         result: list[tuple[str, str]] = []
         for item in chain_config:
+            if role == "media" and media_type:
+                mods = item.get("modalities", "")
+                # modalities may be "image,audio,video" or list
+                if isinstance(mods, str):
+                    mods = [m.strip().lower() for m in mods.split(",")]
+                # map photo->image for convenience
+                alias = {"photo": "image", "voice": "audio"}.get(
+                    media_type, media_type
+                )
+                if alias not in [m.lower() for m in mods]:
+                    continue
             provider_name = item["provider"]
             models = _split_models(item["models"])
             for model in models:
@@ -78,7 +93,17 @@ class LLMRouter(LoggerMixin):
         Raises:
             LLMError: Every candidate failed; carries the last error.
         """
-        chain = self._chain(role)
+        # media_type hint from multimodal content
+        media_type: str | None = None
+        if role == "media":
+            for msg in messages:
+                if isinstance(msg.content, list):
+                    for part in msg.content:
+                        if part.type == "image_url":
+                            media_type = "photo"
+                            break
+
+        chain = self._chain(role, media_type=media_type)
         last_error: Exception | None = None
         for index, (provider_name, model) in enumerate(chain):
             try:

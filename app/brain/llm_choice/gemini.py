@@ -61,11 +61,41 @@ class GeminiProvider(LLMProvider):
             LLMTransientError: 429/5xx or network failure.
             LLMFatalError: Other client errors (unknown model etc).
         """
-        system = "\n\n".join(m.content for m in messages if m.role == "system")
+
+        def _to_parts(msg: ChatMessage) -> list[genai_types.Part]:
+            """Convert ChatMessage content to SDK Parts."""
+            if isinstance(msg.content, str):
+                return [genai_types.Part(text=msg.content)]
+            parts: list[genai_types.Part] = []
+            for part in msg.content:
+                if part.type == "text" and part.text:
+                    parts.append(genai_types.Part(text=part.text))
+                elif part.type == "image_url" and part.inline_data:
+                    import base64
+
+                    data = base64.b64decode(part.inline_data)
+                    mime = part.mime_type or "image/jpeg"
+                    parts.append(
+                        genai_types.Part(
+                            inline_data=genai_types.Blob(
+                                data=data, mime_type=mime
+                            )
+                        )
+                    )
+            return parts
+
+        system_parts = []
+        for m in messages:
+            if m.role == "system":
+                if isinstance(m.content, str):
+                    system_parts.append(m.content)
+                else:
+                    system_parts.extend(p.text for p in m.content if p.text)
+        system = "\n\n".join(system_parts)
         contents = [
             genai_types.Content(
                 role="model" if m.role == "assistant" else "user",
-                parts=[genai_types.Part(text=m.content)],
+                parts=_to_parts(m),
             )
             for m in messages
             if m.role != "system"

@@ -39,11 +39,21 @@ class LLMResponse(BaseModel):
     tool_calls: list[ToolCall] = []
 
 
+class ChatContentPart(BaseModel):
+    """A content part for multimodal messages."""
+
+    type: Literal["text", "image_url"] = "text"
+    text: str | None = None
+    image_url: str | None = None
+    inline_data: str | None = None
+    mime_type: str | None = None
+
+
 class ChatMessage(BaseModel):
-    """A chat-format conversation message."""
+    """A chat-format conversation message (text or multimodal)."""
 
     role: Literal["system", "user", "assistant"]
-    content: str
+    content: str | list[ChatContentPart]
 
 
 class LLMProvider(ABC):

@@ -49,18 +49,23 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
             detail="invalid update",
         ) from None
 
-    chat_id, text = _extract_text(update)
+    chat_id, text, media_type, file_id, caption = _extract_message(update)
     if chat_id is None:
         return {"status": "ignored"}
-    if not text:
+    # Allow photo/video/voice with empty text but with media
+    if not text and media_type is None:
         logger.debug(f"Ignored non-text update: chat_id={chat_id}")
         return {"status": "ignored"}
 
+    # For media, text is caption or empty; caption kept separately
     message = IncomingMessage(
         user_external_id=str(chat_id),
         channel="telegram",
         text=text,
         received_at=datetime.now(UTC),
+        media_type=media_type,
+        media_file_id=file_id,
+        caption=caption,
     )
     await publisher.publish_incoming(message)
     logger.debug(f"Update accepted: chat_id={chat_id}, len={len(text)}")
@@ -103,3 +108,62 @@ def _extract_text(update: Update) -> tuple[int | None, str]:
         update.message.chat.id,
         update.message.text.strip(),
     )
+
+
+def _extract_message(
+    update: Update,
+) -> tuple[int | None, str, str | None, str | None, str | None]:
+    """Pull chat id, text and optional media from a message.
+
+    Returns:
+        (chat_id, text, media_type, file_id, caption).
+        media_type is photo/video/voice/audio or None.
+    """
+    if update.message is None:
+        return None, "", None, None, None
+
+    msg = update.message
+    chat_id = msg.chat.id
+
+    # Text has priority but caption is fallback for media
+    text = (msg.text or "").strip()
+    caption = (msg.caption or "").strip() or None
+
+    # If text present, treat as text; but keep caption for completeness
+    if text:
+        return chat_id, text, None, None, caption
+
+    # Photo: largest size last
+    if msg.photo:
+        # photo is list[PhotoSize], last is biggest
+        file_id = msg.photo[-1].file_id
+        cap = caption or ""
+        return chat_id, cap, "photo", file_id, caption
+
+    if msg.video and msg.video.file_id:
+        return chat_id, caption or "", "video", msg.video.file_id, caption
+
+    if msg.voice and msg.voice.file_id:
+        return chat_id, caption or "", "voice", msg.voice.file_id, caption
+
+    if msg.audio and msg.audio.file_id:
+        return chat_id, caption or "", "audio", msg.audio.file_id, caption
+
+    if msg.document and msg.document.file_id:
+        # Fallback: treat document as photo if mime image
+        mime = msg.document.mime_type or ""
+        if mime.startswith("image/"):
+            return (
+                chat_id,
+                caption or "",
+                "photo",
+                msg.document.file_id,
+                caption,
+            )
+
+    # No media, no text -> ignored
+    if not text and caption is None:
+        # check if there was any text at all
+        return None, "", None, None, None
+
+    return chat_id, text or (caption or ""), None, None, caption

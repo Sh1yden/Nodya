@@ -45,6 +45,34 @@ class GeminiCloudflareProvider(LLMProvider):
     async def close(self) -> None:
         await self._client.aclose()
 
+    def _serialize_messages(self, messages: list[ChatMessage]) -> list[dict]:
+        """Serialize messages, handling multimodal content."""
+        result = []
+        for msg in messages:
+            if isinstance(msg.content, str):
+                result.append(msg.model_dump())
+            else:
+                # list[ChatContentPart] -> OpenAI content parts
+                parts = []
+                for part in msg.content:
+                    if part.type == "text" and part.text:
+                        parts.append({"type": "text", "text": part.text})
+                    elif part.type == "image_url":
+                        # Prefer data URL with inline_data
+                        if part.inline_data:
+                            mime = part.mime_type or "image/jpeg"
+                            url = f"data:{mime};base64,{part.inline_data}"
+                        else:
+                            url = part.image_url or ""
+                        parts.append(
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": url},
+                            }
+                        )
+                result.append({"role": msg.role, "content": parts})
+        return result
+
     async def generate(
         self,
         messages: list[ChatMessage],
@@ -53,7 +81,7 @@ class GeminiCloudflareProvider(LLMProvider):
     ) -> LLMResponse:
         payload = {
             "model": model,
-            "messages": [m.model_dump() for m in messages],
+            "messages": self._serialize_messages(messages),
             "stream": False,
         }
         if tools:
