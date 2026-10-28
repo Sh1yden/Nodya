@@ -49,6 +49,10 @@ class Users(Base):
     discord_id: Mapped[int | None] = mapped_column(
         BigInteger, nullable=True, unique=True
     )
+    display_name: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
+    tg_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
     username: Mapped[str] = mapped_column(
         String(20), nullable=False, unique=True
     )

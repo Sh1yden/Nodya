@@ -27,21 +27,28 @@ def _make_telegram_update(
     chat_id: int = 12345,
     text: str = "Hello bot",
     message_id: int = 1,
+    sender_id: int | None = None,
+    chat_type: str = "private",
+    first_name: str | None = "Test",
+    username: str | None = "testuser",
 ) -> dict:
     """Build a realistic Telegram update payload."""
+    sender = {
+        "id": sender_id if sender_id is not None else chat_id,
+        "is_bot": False,
+    }
+    if first_name is not None:
+        sender["first_name"] = first_name
+    if username is not None:
+        sender["username"] = username
     return {
         "update_id": 1,
         "message": {
             "message_id": message_id,
-            "from": {
-                "id": chat_id,
-                "is_bot": False,
-                "first_name": "Test",
-                "username": "testuser",
-            },
+            "from": sender,
             "chat": {
                 "id": chat_id,
-                "type": "private",
+                "type": chat_type,
             },
             "date": 1234567890,
             "text": text,
@@ -117,3 +124,59 @@ class TestTelegramWebhook:
             assert response.status_code == 202
             data = response.json()
             assert data["status"] == "ignored"
+
+    def test_private_chat_publishes_profile(
+        self, client: TestClient, app: FastAPI
+    ) -> None:
+        mock_publisher = AsyncMock()
+        mock_publisher.publish_incoming = AsyncMock()
+        app.state.publisher = mock_publisher
+
+        with patch("app.chats.telegram.webhook.settings") as mock_settings:
+            mock_settings.TELEGRAM_WEBHOOK_SECRET = "secret123"
+
+            payload = _make_telegram_update(
+                chat_id=111,
+                text="привет",
+                first_name="Иван",
+                username="ivan",
+            )
+            response = client.post(
+                "/webhook/telegram",
+                headers={"X-Telegram-Bot-Api-Secret-Token": "secret123"},
+                json=payload,
+            )
+            assert response.status_code == 202
+
+        msg = mock_publisher.publish_incoming.await_args.args[0]
+        assert msg.user_external_id == "111"
+        assert msg.chat_external_id == "111"
+        assert msg.sender_name == "Иван"
+        assert msg.sender_username == "ivan"
+
+    def test_group_uses_sender_identity_and_chat_destination(
+        self, client: TestClient, app: FastAPI
+    ) -> None:
+        mock_publisher = AsyncMock()
+        mock_publisher.publish_incoming = AsyncMock()
+        app.state.publisher = mock_publisher
+
+        with patch("app.chats.telegram.webhook.settings") as mock_settings:
+            mock_settings.TELEGRAM_WEBHOOK_SECRET = "secret123"
+
+            payload = _make_telegram_update(
+                chat_id=-100500,
+                sender_id=111,
+                chat_type="group",
+                text="привет",
+            )
+            response = client.post(
+                "/webhook/telegram",
+                headers={"X-Telegram-Bot-Api-Secret-Token": "secret123"},
+                json=payload,
+            )
+            assert response.status_code == 202
+
+        msg = mock_publisher.publish_incoming.await_args.args[0]
+        assert msg.user_external_id == "111"
+        assert msg.chat_external_id == "-100500"

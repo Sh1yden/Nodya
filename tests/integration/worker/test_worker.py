@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from uuid import uuid4
 
-from app.worker import Worker, _PendingBatch
+from app.brain.models import Users
+from app.common import IncomingMessage
+from app.worker import Worker, _chat_id, _PendingBatch
 
 
 def _make_session_factory(
@@ -60,6 +64,74 @@ class TestWorkerResolveUser:
         session.add.assert_called_once()
         session.commit.assert_awaited()
 
+    async def test_resolve_user_refreshes_profile(self) -> None:
+        worker = Worker.__new__(Worker)
+        object.__setattr__(worker, "_Worker__logger", MagicMock())
+
+        session = AsyncMock()
+        object.__setattr__(
+            worker,
+            "_session_factory",
+            _make_session_factory(session),
+        )
+        user = Users(
+            user_id=uuid4(),
+            username="tg_111",
+            telegram_id=111,
+            passwd_hash="x",
+            has_usable_password=False,
+            role="user",
+            settings={},
+        )
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = user
+        session.execute = AsyncMock(return_value=mock_result)
+        session.commit = AsyncMock()
+
+        result = await worker._resolve_user(
+            "telegram",
+            "111",
+            sender_name="Иван",
+            sender_username="@ivan",
+        )
+
+        assert result is user
+        assert user.display_name == "Иван"
+        assert user.tg_username == "ivan"
+        session.commit.assert_awaited_once()
+        session.add.assert_not_called()
+
+
+class TestChatId:
+    def test_missing_chat_id(self) -> None:
+        dto = IncomingMessage(
+            user_external_id="1",
+            channel="telegram",
+            text="x",
+            received_at=datetime.now(UTC),
+        )
+        assert _chat_id(dto) is None
+
+    def test_group_chat_id(self) -> None:
+        dto = IncomingMessage(
+            user_external_id="1",
+            chat_external_id="-100500",
+            channel="telegram",
+            text="x",
+            received_at=datetime.now(UTC),
+        )
+        assert _chat_id(dto) == -100500
+
+    def test_malformed_chat_id(self) -> None:
+        dto = IncomingMessage(
+            user_external_id="1",
+            chat_external_id="not-a-number",
+            channel="telegram",
+            text="x",
+            received_at=datetime.now(UTC),
+        )
+        assert _chat_id(dto) is None
+
 
 class TestWorkerLinkCommand:
     def test_link_pattern_matches(self) -> None:
@@ -100,6 +172,59 @@ class TestWorkerDebounce:
         batch = _PendingBatch()
         assert batch.amqp_messages == []
         assert batch.dtos == []
+
+
+class TestWorkerPromptIdentity:
+    async def test_system_prompt_names_interlocutor(
+        self,
+        mock_redis: AsyncMock,
+        mock_publisher: AsyncMock,
+        mock_llm_router: AsyncMock,
+        mock_vectors: AsyncMock,
+    ) -> None:
+        session = AsyncMock()
+        facts_result = MagicMock()
+        facts_result.all.return_value = []
+        session.scalars = AsyncMock(return_value=facts_result)
+        session.add_all = MagicMock()
+        worker = Worker(
+            broker_url="amqp://guest:guest@localhost/",
+            redis_client=mock_redis,
+            session_factory=_make_session_factory(session),
+            publisher=mock_publisher,
+            router=mock_llm_router,
+            vectors=mock_vectors,
+        )
+        user = Users(
+            user_id=uuid4(),
+            username="tg_1188741734",
+            telegram_id=1188741734,
+            display_name="Иван",
+            tg_username="ivan",
+            passwd_hash="x",
+            has_usable_password=False,
+            role="user",
+            settings={},
+        )
+        dto = IncomingMessage(
+            user_external_id="1188741734",
+            chat_external_id="-100500",
+            sender_name="Иван",
+            sender_username="ivan",
+            channel="telegram",
+            text="привет",
+            received_at=datetime.now(UTC),
+        )
+
+        outgoing = await worker._handle_dtos(user, [dto])
+
+        chat = mock_llm_router.generate_with_fallback.await_args.args[1]
+        system = chat[0].content
+        assert "Иван" in system
+        assert "1188741734" in system
+        assert "НЕ твой создатель" in system
+        assert outgoing[0].chat_external_id == "-100500"
+        mock_publisher.publish_outgoing.assert_awaited_once()
 
 
 class TestWorkerProactiveDecision:

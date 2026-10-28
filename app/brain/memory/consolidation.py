@@ -48,15 +48,20 @@ the user and Nodya. Produce STRICT JSON only, no markdown fences:
  "summary": "..."}
 
 Rules for facts:
-- Only durable facts about the USER (identity, preferences, work,
-  relationships, goals). Ignore small talk and Nodya's replies.
+- Only durable facts about the dialogue owner identified in the
+  input (identity, preferences, work, relationships, goals). Ignore
+  small talk and Nodya's replies.
+- Never extract facts about Nodya, other people, or the creator
+  unless the owner is the creator. Never describe Nodya as the user.
 - value: one concise third-person sentence in the language the user
-  spoke.
+  spoke; use the person's name when known instead of "the user".
 - confidence in [0, 1]. Return "facts": [] when nothing is durable.
 
 Rules for summary:
 - 2-5 sentences in the user's language capturing the essence of the
-  conversation: topics, decisions, unfinished threads, tone."""
+  conversation: topics, decisions, unfinished threads, tone.
+- The summary is about this specific person only; mention their name
+  when known so later prompts cannot mix identities."""
 
 _MAX_FACTS_PER_RUN = 30
 _LOCK_TTL_SECONDS = 600
@@ -164,9 +169,16 @@ class ConsolidationJob(LoggerMixin):
             if len(history) < settings.CONSOLIDATION_MIN_MESSAGES:
                 return False
 
+            user = await self._load_user(user_id)
+            if user is None:
+                self._lg.warning(
+                    f"Consolidation skipped: user {user_id} not found."
+                )
+                return False
+
             await self._redis.set_state(user_id, "sleeping")
             try:
-                analysis = await self._analyze(history)
+                analysis = await self._analyze(user, history)
                 fact_points = await self._persist_facts(user_id, analysis)
                 await self._vectorize(user_id, fact_points)
 
@@ -192,10 +204,25 @@ class ConsolidationJob(LoggerMixin):
         finally:
             await self._redis.release_lock(user_id, token)
 
-    async def _analyze(self, history: list[ContextMessage]) -> Analysis:
+    async def _load_user(self, user_id: UUID) -> Users | None:
+        """Fetch the dialogue owner for prompt anchoring.
+
+        Args:
+            user_id: Internal user UUID.
+
+        Returns:
+            Persisted user row or None when the account is gone.
+        """
+        async with self._session_factory() as session:
+            return await session.get(Users, user_id)
+
+    async def _analyze(
+        self, user: Users, history: list[ContextMessage]
+    ) -> Analysis:
         """Extract facts and the summary from the dialogue history.
 
         Args:
+            user: Dialogue owner the transcript belongs to.
             history: Chronological short-term history.
 
         Returns:
@@ -208,7 +235,10 @@ class ConsolidationJob(LoggerMixin):
         lines = [f"{entry.role}: {entry.content}" for entry in history]
         chat = [
             ChatMessage(role="system", content=_ANALYSIS_SYSTEM),
-            ChatMessage(role="user", content="\n".join(lines)),
+            ChatMessage(
+                role="user",
+                content=f"{_user_identity(user)}\n\n" + "\n".join(lines),
+            ),
         ]
         response = await self._router.generate_with_fallback("cs", chat)
         payload = _parse_json(response.text or "")
@@ -297,6 +327,31 @@ def _parse_json(raw: str) -> dict[str, Any]:
     if start == -1 or end == -1:
         raise ValueError("No JSON object in model output.")
     return json.loads(cleaned[start : end + 1])
+
+
+def _user_identity(user: Users) -> str:
+    """Build the dialogue-owner anchor for the analysis prompt.
+
+    Args:
+        user: Dialogue owner of the transcript.
+
+    Returns:
+        Header block the CS model must treat as the only fact subject.
+    """
+    name = user.display_name or user.username
+    handle = f" (@{user.tg_username})" if user.tg_username else ""
+    role = "owner/creator" if user.role == "owner" else "regular user"
+    external = user.telegram_id if user.telegram_id is not None else "unknown"
+    return (
+        "Dialogue owner (the USER in the transcript below):\n"
+        f"- name: {name}{handle}\n"
+        f"- telegram_id: {external}\n"
+        f"- role: {role}\n"
+        "Extract facts only about this person. Never attribute Nodya's "
+        "words, other people's facts, or creator lore to them; never "
+        "describe Nodya herself as the user. Use the person's name in "
+        "fact values when known."
+    )
 
 
 async def _cli_main() -> None:

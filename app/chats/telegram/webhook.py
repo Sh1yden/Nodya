@@ -5,7 +5,9 @@ Update parsing and IncomingMessage publishing (receive-only principle).
 """
 
 import secrets
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Literal
 
 from aiogram.types import Update
 from fastapi import APIRouter, HTTPException, Request, status
@@ -19,6 +21,22 @@ router = APIRouter()
 
 _SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 
+MediaType = Literal["photo", "video", "voice", "audio"]
+
+
+@dataclass(slots=True)
+class _ParsedMessage:
+    """Fields of one Telegram message relevant to the pipeline."""
+
+    chat_id: int | None
+    sender_id: int | None
+    text: str
+    media_type: MediaType | None
+    file_id: str | None
+    caption: str | None
+    sender_name: str | None
+    sender_username: str | None
+
 
 @router.post(
     "/webhook/telegram",
@@ -26,6 +44,10 @@ _SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 )
 async def telegram_webhook(request: Request) -> dict[str, str]:
     """Accept a Telegram update and publish it to the incoming queue.
+
+    The sender (``from_user``) is the identity; ``chat.id`` is only
+    the delivery destination, so group participants never share an
+    account.
 
     Args:
         request: Raw request carrying the Telegram update JSON.
@@ -49,26 +71,31 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
             detail="invalid update",
         ) from None
 
-    chat_id, text, media_type, file_id, caption = _extract_message(update)
-    if chat_id is None:
+    parsed = _extract_message(update)
+    if parsed.chat_id is None or parsed.sender_id is None:
         return {"status": "ignored"}
     # Allow photo/video/voice with empty text but with media
-    if not text and media_type is None:
-        logger.debug(f"Ignored non-text update: chat_id={chat_id}")
+    if not parsed.text and parsed.media_type is None:
+        logger.debug(f"Ignored non-text update: chat_id={parsed.chat_id}")
         return {"status": "ignored"}
 
-    # For media, text is caption or empty; caption kept separately
     message = IncomingMessage(
-        user_external_id=str(chat_id),
+        user_external_id=str(parsed.sender_id),
+        chat_external_id=str(parsed.chat_id),
         channel="telegram",
-        text=text,
+        text=parsed.text,
         received_at=datetime.now(UTC),
-        media_type=media_type,
-        media_file_id=file_id,
-        caption=caption,
+        sender_name=parsed.sender_name,
+        sender_username=parsed.sender_username,
+        media_type=parsed.media_type,
+        media_file_id=parsed.file_id,
+        caption=parsed.caption,
     )
     await publisher.publish_incoming(message)
-    logger.debug(f"Update accepted: chat_id={chat_id}, len={len(text)}")
+    logger.debug(
+        f"Update accepted: sender_id={parsed.sender_id}, "
+        f"chat_id={parsed.chat_id}, len={len(parsed.text)}"
+    )
     return {"status": "accepted"}
 
 
@@ -92,78 +119,71 @@ def _check_secret(request: Request) -> None:
         )
 
 
-def _extract_text(update: Update) -> tuple[int | None, str]:
-    """Pull chat id and text from a plain text message.
-
-    Args:
-        update: Parsed Telegram update.
+def _extract_message(update: Update) -> _ParsedMessage:
+    """Pull sender, chat, text and optional media from an update.
 
     Returns:
-        Tuple of (chat_id, stripped text); (None, "") when the update
-        carries no text message.
+        Parsed message; ``chat_id``/``sender_id`` are None when the
+        update carries no message. ``sender_id`` falls back to the
+        chat id for channel posts without ``from_user``.
     """
-    if update.message is None or update.message.text is None:
-        return None, ""
-    return (
-        update.message.chat.id,
-        update.message.text.strip(),
-    )
-
-
-def _extract_message(
-    update: Update,
-) -> tuple[int | None, str, str | None, str | None, str | None]:
-    """Pull chat id, text and optional media from a message.
-
-    Returns:
-        (chat_id, text, media_type, file_id, caption).
-        media_type is photo/video/voice/audio or None.
-    """
+    empty = _ParsedMessage(None, None, "", None, None, None, None, None)
     if update.message is None:
-        return None, "", None, None, None
+        return empty
 
     msg = update.message
     chat_id = msg.chat.id
+    sender = msg.from_user
+    sender_id = sender.id if sender is not None else chat_id
+    sender_name = None
+    sender_username = None
+    if sender is not None:
+        parts = (sender.first_name, sender.last_name)
+        sender_name = " ".join(p for p in parts if p).strip() or None
+        sender_username = sender.username
 
-    # Text has priority but caption is fallback for media
     text = (msg.text or "").strip()
     caption = (msg.caption or "").strip() or None
 
-    # If text present, treat as text; but keep caption for completeness
-    if text:
-        return chat_id, text, None, None, caption
+    def _make(
+        media_type: MediaType | None = None,
+        file_id: str | None = None,
+        body: str | None = None,
+    ) -> _ParsedMessage:
+        return _ParsedMessage(
+            chat_id=chat_id,
+            sender_id=sender_id,
+            text=body if body is not None else text,
+            media_type=media_type,
+            file_id=file_id,
+            caption=caption,
+            sender_name=sender_name,
+            sender_username=sender_username,
+        )
 
-    # Photo: largest size last
+    if text:
+        return _make()
+
     if msg.photo:
         # photo is list[PhotoSize], last is biggest
-        file_id = msg.photo[-1].file_id
-        cap = caption or ""
-        return chat_id, cap, "photo", file_id, caption
+        return _make("photo", msg.photo[-1].file_id, caption or "")
 
     if msg.video and msg.video.file_id:
-        return chat_id, caption or "", "video", msg.video.file_id, caption
+        return _make("video", msg.video.file_id, caption or "")
 
     if msg.voice and msg.voice.file_id:
-        return chat_id, caption or "", "voice", msg.voice.file_id, caption
+        return _make("voice", msg.voice.file_id, caption or "")
 
     if msg.audio and msg.audio.file_id:
-        return chat_id, caption or "", "audio", msg.audio.file_id, caption
+        return _make("audio", msg.audio.file_id, caption or "")
 
     if msg.document and msg.document.file_id:
         # Fallback: treat document as photo if mime image
         mime = msg.document.mime_type or ""
         if mime.startswith("image/"):
-            return (
-                chat_id,
-                caption or "",
-                "photo",
-                msg.document.file_id,
-                caption,
-            )
+            return _make("photo", msg.document.file_id, caption or "")
 
-    # No media, no text -> ignored
-    if not text and caption is None:
-        # check if there was any text at all
-        return None, "", None, None, None
+    if caption is not None:
+        return _make(body=caption)
 
-    return chat_id, text or (caption or ""), None, None, caption
+    return empty

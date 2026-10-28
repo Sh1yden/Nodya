@@ -47,6 +47,31 @@ class TestIncomingMessage:
             )
             assert msg.channel == ch
 
+    def test_identity_fields_default_to_none(self) -> None:
+        msg = IncomingMessage(
+            user_external_id="1",
+            channel="telegram",
+            text="x",
+            received_at=datetime.now(UTC),
+        )
+        assert msg.chat_external_id is None
+        assert msg.sender_name is None
+        assert msg.sender_username is None
+
+    def test_identity_fields_accepted(self) -> None:
+        msg = IncomingMessage(
+            user_external_id="111",
+            chat_external_id="-100500",
+            sender_name="Иван",
+            sender_username="ivan",
+            channel="telegram",
+            text="x",
+            received_at=datetime.now(UTC),
+        )
+        assert msg.chat_external_id == "-100500"
+        assert msg.sender_name == "Иван"
+        assert msg.sender_username == "ivan"
+
 
 class TestOutgoingMessage:
     """Validate OutgoingMessage construction."""
@@ -68,6 +93,15 @@ class TestOutgoingMessage:
             delay_until=now,
         )
         assert msg.delay_until == now
+
+    def test_with_pinned_chat(self) -> None:
+        msg = OutgoingMessage(
+            user_id=uuid4(),
+            channel="telegram",
+            text="Group reply",
+            chat_external_id="-100500",
+        )
+        assert msg.chat_external_id == "-100500"
 
 
 class TestScheduledEnvelope:

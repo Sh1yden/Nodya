@@ -18,6 +18,7 @@ from app.brain.memory.consolidation import (
     _parse_json,
 )
 from app.brain.memory.short.redis import ContextMessage
+from app.brain.models import Users
 
 
 def _make_session_factory(
@@ -161,15 +162,34 @@ class TestConsolidationJobRunUser:
         )
         router.embed = AsyncMock(return_value=[[0.1]])
 
+        user = Users(
+            user_id=uuid.uuid4(),
+            username="tg_1188741734",
+            telegram_id=1188741734,
+            display_name="Иван",
+            tg_username="ivan",
+            passwd_hash="x",
+            has_usable_password=False,
+            role="user",
+            settings={},
+        )
         session = AsyncMock()
         session.execute = AsyncMock()
         session.commit = AsyncMock()
+        session.get = AsyncMock(return_value=user)
         object.__setattr__(
             job,
             "_session_factory",
             _make_session_factory(session),
         )
 
-        result = await job.run_user(uuid.uuid4(), check_idle=False)
+        result = await job.run_user(user.user_id, check_idle=False)
         assert result is True
         mock_redis.replace_context.assert_awaited()
+
+        call = router.generate_with_fallback.await_args
+        assert call.args[0] == "cs"
+        prompt = call.args[1][1].content
+        assert "Иван" in prompt
+        assert "1188741734" in prompt
+        assert "regular user" in prompt

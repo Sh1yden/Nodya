@@ -113,7 +113,7 @@ class TGSender(LoggerMixin):
             await message.ack()
             return
 
-        chat_id = await self._lookup_chat_id(dto.user_id)
+        chat_id = await self._resolve_chat_id(dto)
         if chat_id is None:
             self._lg.warning(
                 f"telegram_id missing for user_id={dto.user_id} — "
@@ -195,6 +195,28 @@ class TGSender(LoggerMixin):
         else:
             await self._typing_indicator.stop(chat_id)
         await message.ack()
+
+    async def _resolve_chat_id(self, dto: OutgoingMessage) -> int | None:
+        """Pick the destination chat of a reply.
+
+        Group batches pin ``chat_external_id``; proactive and direct
+        messages fall back to the user's Telegram account.
+
+        Args:
+            dto: Outgoing message with optional pinned chat.
+
+        Returns:
+            Telegram chat id, or None when it cannot be resolved.
+        """
+        if dto.chat_external_id is not None:
+            try:
+                return int(dto.chat_external_id)
+            except ValueError:
+                self._lg.warning(
+                    f"Bad chat_external_id={dto.chat_external_id!r} for "
+                    f"user_id={dto.user_id}; using direct chat."
+                )
+        return await self._lookup_chat_id(dto.user_id)
 
     async def _lookup_chat_id(self, user_id: UUID) -> int | None:
         """Resolve the telegram_id of a user.

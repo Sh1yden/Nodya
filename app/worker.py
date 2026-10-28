@@ -35,7 +35,7 @@ from sqlalchemy import update as sa_update
 from sqlalchemy.exc import IntegrityError
 
 from app.api.messaging import MessagePublisher
-from app.brain import load_system_prompt
+from app.brain import build_interlocutor_block, load_system_prompt
 from app.brain.llm_choice import ChatContentPart, ChatMessage, LLMRouter
 from app.brain.memory.short import ContextMessage, RedisClient
 from app.brain.memory.vector import VectorMemory
@@ -57,6 +57,16 @@ _LINK_COMMAND_PATTERN = re.compile(
     r"^/(?:link|start)\s+([A-Za-z0-9]{6,12})$", re.IGNORECASE
 )
 _HISTORY_LIMIT_FALLBACK = 20
+
+
+def _chat_id(dto: IncomingMessage) -> int | None:
+    """Parse the delivery chat id from a channel DTO."""
+    if dto.chat_external_id is None:
+        return None
+    try:
+        return int(dto.chat_external_id)
+    except ValueError:
+        return None
 
 
 @dataclass(slots=True)
@@ -186,6 +196,16 @@ class Worker(LoggerMixin):
         match = _LINK_COMMAND_PATTERN.match(dto.text.strip())
         if not match:
             return False
+        if (
+            dto.chat_external_id is not None
+            and dto.chat_external_id != dto.user_external_id
+        ):
+            await self._ack_with_reply(
+                dto,
+                message,
+                "Линковка аккаунта доступна только в личном чате.",
+            )
+            return True
         try:
             await self._handle_link(dto, message, match.group(1))
         except Exception as exc:
@@ -317,12 +337,18 @@ class Worker(LoggerMixin):
             message: Raw AMQP delivery to acknowledge.
             text: Human-facing reply text.
         """
-        local_user = await self._resolve_user("telegram", dto.user_external_id)
+        local_user = await self._resolve_user(
+            "telegram",
+            dto.user_external_id,
+            sender_name=dto.sender_name,
+            sender_username=dto.sender_username,
+        )
         await self._publisher.publish_outgoing(
             OutgoingMessage(
                 user_id=local_user.user_id,
                 channel=dto.channel,
                 text=text,
+                chat_external_id=dto.chat_external_id,
             )
         )
         await message.ack()
@@ -359,7 +385,12 @@ class Worker(LoggerMixin):
             amqp_messages: Matching raw deliveries to acknowledge.
         """
         first = dtos[0]
-        user = await self._resolve_user(first.channel, first.user_external_id)
+        user = await self._resolve_user(
+            first.channel,
+            first.user_external_id,
+            sender_name=first.sender_name,
+            sender_username=first.sender_username,
+        )
         lock_token = await self._redis.acquire_lock(user.user_id)
         if lock_token is None:
             self._lg.warning(
@@ -370,11 +401,16 @@ class Worker(LoggerMixin):
             return
         # Typing indicator (ADR-17): publish start/stop via RabbitMQ,
         # consumed by channel senders; failures must not break batch.
-        await self._publish_typing(user.user_id, first.channel, "start")
+        chat_id = _chat_id(first)
+        await self._publish_typing(
+            user.user_id, first.channel, "start", chat_id
+        )
         try:
-            await self._run_locked(user.user_id, dtos)
+            await self._run_locked(user, dtos)
         finally:
-            await self._publish_typing(user.user_id, first.channel, "stop")
+            await self._publish_typing(
+                user.user_id, first.channel, "stop", chat_id
+            )
             await self._redis.release_lock(user.user_id, lock_token)
         self._lg.debug(
             f"Batch processed: n={len(dtos)} user_id={user.user_id}"
@@ -383,7 +419,11 @@ class Worker(LoggerMixin):
             await amqp_message.ack()
 
     async def _publish_typing(
-        self, user_id: UUID, channel: str, action: str
+        self,
+        user_id: UUID,
+        channel: str,
+        action: str,
+        chat_id: int | None = None,
     ) -> None:
         """Publish typing event, suppressing errors.
 
@@ -391,16 +431,23 @@ class Worker(LoggerMixin):
             user_id: Internal user UUID.
             channel: Channel name.
             action: ``start`` or ``stop``.
+            chat_id: Destination chat when it differs from the user's
+                direct chat (groups).
         """
         try:
             await self._publisher.publish_typing(
-                TypingEvent(user_id=user_id, channel=channel, action=action)
+                TypingEvent(
+                    user_id=user_id,
+                    channel=channel,
+                    action=action,
+                    chat_id=chat_id,
+                )
             )
         except Exception as exc:
             self._lg.warning(f"Typing {action} failed for {user_id}: {exc}")
 
     async def _run_locked(
-        self, user_id: UUID, dtos: list[IncomingMessage]
+        self, user: Users, dtos: list[IncomingMessage]
     ) -> list[OutgoingMessage]:
         """Handle a batch under an already-taken lock.
 
@@ -409,12 +456,13 @@ class Worker(LoggerMixin):
         the reply, saves context and returns to idle.
 
         Args:
-            user_id: Internal user UUID.
+            user: Interlocutor owning the dialogue.
             dtos: Batch messages to answer.
 
         Returns:
             Published outgoing messages.
         """
+        user_id = user.user_id
         decision = self._proactive_decision()
         if decision != "now":
             # TODO(stage-7): implement delay/skip branches together
@@ -424,7 +472,7 @@ class Worker(LoggerMixin):
             user_id, "thinking", ttl=_THINKING_TTL_SECONDS
         )
         self._lg.debug(f"State thinking: user_id={user_id}")
-        outgoing = await self._handle_dtos(user_id, dtos)
+        outgoing = await self._handle_dtos(user, dtos)
         await self._save_dialog_context(user_id, dtos, outgoing)
         await self._redis.set_state(user_id, "idle")
         self._lg.debug(f"State idle: user_id={user_id}")
@@ -471,20 +519,22 @@ class Worker(LoggerMixin):
             self._lg.error(f"Context not saved for {user_id}: {exc}")
 
     async def _handle_dtos(
-        self, user_id: UUID, dtos: list[IncomingMessage]
+        self, user: Users, dtos: list[IncomingMessage]
     ) -> list[OutgoingMessage]:
         """Generate one reply for the whole batch (ADR-12 debounce).
 
-        Assembles system prompt (ME/RULES), Redis history and the
-        joined batch text, then routes through the dialogue chain.
+        Assembles the interlocutor identity block, system prompt
+        (ME/RULES/CREATOR), Redis history and the joined batch text,
+        then routes through the dialogue chain.
 
         Args:
-            user_id: Internal user UUID.
+            user: Interlocutor owning the dialogue.
             dtos: Batch messages to answer.
 
         Returns:
             The single published reply wrapped in a list.
         """
+        user_id = user.user_id
         limit = settings.LLM_HISTORY_LIMIT or _HISTORY_LIMIT_FALLBACK
         history = await self._redis.get_context(user_id, limit=limit)
         batch_text = "\n".join(d.text for d in dtos)
@@ -498,8 +548,19 @@ class Worker(LoggerMixin):
             else:
                 batch_text = media_info
 
-        system_base = load_system_prompt()
-        memory_block = await self._long_term_block(user_id, batch_text)
+        display_name = self._display_name(user)
+        is_owner = user.role == "owner"
+        identity_block = build_interlocutor_block(
+            name=display_name,
+            username=user.tg_username,
+            external_id=dtos[0].user_external_id,
+            channel=dtos[0].channel,
+            is_owner=is_owner,
+        )
+        system_base = "\n\n".join(
+            [load_system_prompt(is_owner=is_owner), identity_block]
+        )
+        memory_block = await self._long_term_block(user, batch_text)
         if memory_block:
             system_base = f"{system_base}\n\n{memory_block}"
 
@@ -512,8 +573,8 @@ class Worker(LoggerMixin):
                     ChatMessage(
                         role="system",
                         content=(
-                            "Compressed memory of earlier conversations:\n"
-                            + m.content
+                            "Compressed memory of earlier conversations "
+                            f"with {display_name}:\n" + m.content
                         ),
                     )
                 )
@@ -531,12 +592,13 @@ class Worker(LoggerMixin):
             user_id=user_id,
             channel=dtos[0].channel,
             text=reply_text,
+            chat_external_id=dtos[0].chat_external_id,
         )
         await self._publisher.publish_outgoing(outgoing)
         await self._archive_batch(user_id, incoming=dtos, outgoing=[outgoing])
         return [outgoing]
 
-    async def _long_term_block(self, user_id: UUID, batch_text: str) -> str:
+    async def _long_term_block(self, user: Users, batch_text: str) -> str:
         """Assemble long-term memory lines for the system prompt.
 
         Combines the freshest PG facts (confidence-filtered) with
@@ -545,12 +607,13 @@ class Worker(LoggerMixin):
         log — dialogue continues without memory rather than crashing.
 
         Args:
-            user_id: Internal user UUID.
+            user: Interlocutor whose memory is assembled.
             batch_text: Joined text of the current batch (the query).
 
         Returns:
             Formatted memory block, or "" when nothing to add.
         """
+        user_id = user.user_id
         try:
             async with self._session_factory() as session:
                 facts = await HardFactsRepo(session).search_last_updated(
@@ -583,7 +646,7 @@ class Worker(LoggerMixin):
 
         if not fact_lines and not hit_lines:
             return ""
-        parts = ["Long-term memory about this user:"]
+        parts = [f"Long-term memory about {self._display_name(user)}:"]
         parts += fact_lines + hit_lines
         return "\n".join(parts)
 
@@ -689,12 +752,25 @@ class Worker(LoggerMixin):
         except Exception as exc:
             self._lg.error(f"Messages archive failed for {user_id}: {exc}")
 
-    async def _resolve_user(self, channel: str, external_id: str) -> Users:
+    async def _resolve_user(
+        self,
+        channel: str,
+        external_id: str,
+        *,
+        sender_name: str | None = None,
+        sender_username: str | None = None,
+    ) -> Users:
         """Find a user by channel external id or auto-register one.
+
+        Refreshes the stored profile (display name and Telegram
+        username) on every call so the dialogue prompt always knows
+        who the interlocutor is.
 
         Args:
             channel: Channel name ("telegram" only for now).
             external_id: Channel-specific user id.
+            sender_name: Human-readable name from the channel.
+            sender_username: Channel username without the leading "@".
 
         Returns:
             Existing or freshly created Users row.
@@ -710,12 +786,18 @@ class Worker(LoggerMixin):
             repo = UsersRepo(session)
             user = await repo.get_by_field("telegram_id", telegram_id)
             if user is not None:
+                if self._apply_profile(
+                    user, channel, sender_name, sender_username
+                ):
+                    await session.commit()
                 return user
             from app.brain.repositories.security import hash_password
 
             user = Users(
                 username=self._generated_username(telegram_id),
                 telegram_id=telegram_id,
+                display_name=self._clean_name(sender_name),
+                tg_username=self._clean_username(sender_username),
                 passwd_hash=hash_password(uuid4().hex),
                 has_usable_password=False,
                 role="user",
@@ -734,6 +816,55 @@ class Worker(LoggerMixin):
                 f"user_id={user.user_id}."
             )
             return user
+
+    @staticmethod
+    def _apply_profile(
+        user: Users,
+        channel: str,
+        sender_name: str | None,
+        sender_username: str | None,
+    ) -> bool:
+        """Refresh display name/username from the channel profile.
+
+        Args:
+            user: Persisted account to update in place.
+            channel: Channel name.
+            sender_name: Human-readable name from the channel.
+            sender_username: Channel username without the leading "@".
+
+        Returns:
+            True when a field changed and the session must commit.
+        """
+        if sender_name is None:
+            return False
+        display_name = Worker._clean_name(sender_name)
+        changed = user.display_name != display_name
+        user.display_name = display_name
+        if channel == "telegram":
+            tg_username = Worker._clean_username(sender_username)
+            if user.tg_username != tg_username:
+                user.tg_username = tg_username
+                changed = True
+        return changed
+
+    @staticmethod
+    def _clean_name(sender_name: str | None) -> str | None:
+        """Normalize a channel display name to the column limit."""
+        if sender_name is None:
+            return None
+        return sender_name.strip()[:128] or None
+
+    @staticmethod
+    def _clean_username(sender_username: str | None) -> str | None:
+        """Normalize a channel username to the column limit."""
+        if sender_username is None:
+            return None
+        return sender_username.strip().lstrip("@")[:64] or None
+
+    @staticmethod
+    def _display_name(user: Users) -> str:
+        """Human-readable name for prompts and memory headers."""
+        return user.display_name or user.username
 
     @staticmethod
     def _generated_username(telegram_id: int) -> str:
@@ -812,16 +943,26 @@ class Worker(LoggerMixin):
         assert envelope.incoming is not None
         dtos = envelope.incoming
         first = dtos[0]
-        user = await self._resolve_user(first.channel, first.user_external_id)
+        user = await self._resolve_user(
+            first.channel,
+            first.user_external_id,
+            sender_name=first.sender_name,
+            sender_username=first.sender_username,
+        )
         lock_token = await self._redis.acquire_lock(user.user_id)
         if lock_token is None:
             await self._defer_incoming(
                 dtos, [], retry=envelope.retry_count + 1
             )
             return
-        await self._publish_typing(user.user_id, first.channel, "start")
+        chat_id = _chat_id(first)
+        await self._publish_typing(
+            user.user_id, first.channel, "start", chat_id
+        )
         try:
-            await self._run_locked(user.user_id, dtos)
+            await self._run_locked(user, dtos)
         finally:
-            await self._publish_typing(user.user_id, first.channel, "stop")
+            await self._publish_typing(
+                user.user_id, first.channel, "stop", chat_id
+            )
             await self._redis.release_lock(user.user_id, lock_token)

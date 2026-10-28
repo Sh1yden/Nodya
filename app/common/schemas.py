@@ -16,26 +16,36 @@ Channel = Literal["telegram", "discord", "browser", "cli"]
 class IncomingMessage(BaseModel):
     """A user message accepted from a channel.
 
-    Photo/video/voice carry ``media_*`` + optional caption; ``text``
-    is the caption or plain text.
+    ``user_external_id`` identifies the sender, ``chat_external_id``
+    is where the reply must be delivered (they differ in group
+    chats). Photo/video/voice carry ``media_*`` + optional caption;
+    ``text`` is the caption or plain text.
     """
 
     user_external_id: str
     channel: Channel
     text: str
     received_at: datetime
+    chat_external_id: str | None = None
+    sender_name: str | None = None
+    sender_username: str | None = None
     media_type: Literal["photo", "video", "voice", "audio"] | None = None
     media_file_id: str | None = None
     caption: str | None = None
 
 
 class OutgoingMessage(BaseModel):
-    """A reply or proactive message of Nodya for delivery."""
+    """A reply or proactive message of Nodya for delivery.
+
+    ``chat_external_id`` pins the destination chat of the incoming
+    batch (groups); None means the channel default (direct chat).
+    """
 
     user_id: UUID
     channel: Channel
     text: str
     delay_until: datetime | None = None
+    chat_external_id: str | None = None
 
 
 class ScheduledEnvelope(BaseModel):

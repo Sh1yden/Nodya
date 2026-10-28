@@ -88,3 +88,26 @@ class TestTGSender:
             await sender._on_message(msg)
             sender._bot.send_message.assert_awaited_once()
             msg.ack.assert_awaited_once()
+
+    async def test_on_message_prefers_pinned_chat(self) -> None:
+        from app.chats.telegram.sender import TGSender
+
+        sender = TGSender.__new__(TGSender)
+        object.__setattr__(sender, "_logger", Mock())
+        sender._bot = AsyncMock()
+        sender._session_factory = AsyncMock()
+
+        msg = AsyncMock()
+        payload = OutgoingMessage(
+            user_id=uuid.uuid4(),
+            channel="telegram",
+            text="Group reply",
+            chat_external_id="-100500",
+        )
+        msg.body = payload.model_dump_json().encode()
+
+        await sender._on_message(msg)
+        sender._bot.send_message.assert_awaited_once_with(
+            chat_id=-100500, text="Group reply"
+        )
+        msg.ack.assert_awaited_once()

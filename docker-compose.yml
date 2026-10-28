@@ -1,7 +1,15 @@
 services:
   app:
     container_name: nodya_heart
-    build: .
+    build:
+      context: .
+      args:
+        - HTTP_PROXY
+        - HTTPS_PROXY
+        - NO_PROXY
+    networks:
+      - default
+      - internet_bridge
     restart: always
     environment:
       - POSTGRES_HOST=postgres
@@ -31,9 +39,6 @@ services:
       start_period: 15s
     env_file:
       - .env
-    networks:
-      - default
-      - internet_bridge
 
   postgres:
     container_name: nodya_long_memory
