@@ -46,9 +46,18 @@ class Messages(Base):
     external_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     source_kind: Mapped[
-        Literal["text", "photo", "video", "voice", "audio"]
+        Literal[
+            "text",
+            "photo",
+            "video",
+            "voice",
+            "audio",
+            "animation",
+            "sticker",
+            "video_note",
+        ]
     ] = mapped_column(
-        String(8),
+        String(32),
         nullable=False,
         default="text",
         server_default="text",

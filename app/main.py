@@ -31,6 +31,8 @@ from app.brain.memory.consolidation import ConsolidationJob
 from app.brain.memory.long import AsyncSessionLocal, engine
 from app.brain.memory.short import RedisClient
 from app.brain.memory.vector import VectorMemory
+from app.brain.vision import MediaRecognizer
+from app.chats.media_fetcher import fetch_telegram_media
 from app.chats.telegram import TGSender
 from app.chats.telegram import router as telegram_webhook_router
 from app.core import get_logger, settings, setup_logging
@@ -69,6 +71,13 @@ async def lifespan(app: FastAPI):
         port=settings.QDRANT_PORT,
         collection=settings.QDRANT_COLLECTION,
     )
+    media_recognizer = MediaRecognizer(
+        router=router,
+        fetch_media=fetch_telegram_media,
+        max_image_bytes=settings.MEDIA_IMAGE_MAX_BYTES,
+        max_chars=settings.MEDIA_DESCRIPTION_MAX_CHARS,
+        max_per_batch=settings.MEDIA_MAX_PER_BATCH,
+    )
 
     worker = Worker(
         broker_url=settings.rabbitmq_url,
@@ -77,6 +86,7 @@ async def lifespan(app: FastAPI):
         publisher=publisher,
         router=router,
         vectors=vectors,
+        media_recognizer=media_recognizer,
     )
     consolidation = ConsolidationJob(
         redis_client=redis_client,

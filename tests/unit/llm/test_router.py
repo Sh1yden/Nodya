@@ -292,3 +292,74 @@ class TestLLMRouterEmbed:
         result = await router.embed(["hello"])
         assert result == [[0.1, 0.2]]
         gemini.embed.assert_awaited_once_with(["hello"], "gemini-embed")
+
+
+class TestLLMRouterMediaChain:
+    """Modality filtering of the media role chain."""
+
+    @patch("app.brain.llm_choice.router.settings")
+    def test_explicit_modalities_filter_candidates(
+        self, mock_settings: Mock
+    ) -> None:
+        mock_settings.LLM_PROVIDER_CHAINS = {
+            "media": [
+                {
+                    "provider": "gemini_cloudflare",
+                    "models": "vision-a",
+                    "modalities": "image",
+                },
+                {
+                    "provider": "openrouter",
+                    "models": "text-only",
+                    "modalities": "text",
+                },
+                {
+                    "provider": "gemini",
+                    "models": "vision-b",
+                    "modalities": ["image", "audio"],
+                },
+            ],
+        }
+
+        router = LLMRouter(registry=_make_mock_registry(AsyncMock()))
+
+        chain = router._chain("media", media_type="photo")
+        assert chain == [
+            ("gemini_cloudflare", "vision-a"),
+            ("gemini", "vision-b"),
+        ]
+
+    @patch("app.brain.llm_choice.router.settings")
+    def test_missing_modalities_is_not_filtered(
+        self, mock_settings: Mock
+    ) -> None:
+        mock_settings.LLM_PROVIDER_CHAINS = {
+            "media": [{"provider": "gemini_cloudflare", "models": "vision-a"}],
+        }
+
+        router = LLMRouter(registry=_make_mock_registry(AsyncMock()))
+
+        chain = router._chain("media", media_type="photo")
+        assert chain == [("gemini_cloudflare", "vision-a")]
+
+    @patch("app.brain.llm_choice.router.settings")
+    def test_voice_aliases_to_audio(self, mock_settings: Mock) -> None:
+        mock_settings.LLM_PROVIDER_CHAINS = {
+            "media": [
+                {
+                    "provider": "gemini_cloudflare",
+                    "models": "vision-a",
+                    "modalities": "image",
+                },
+                {
+                    "provider": "gemini",
+                    "models": "audio-a",
+                    "modalities": "audio",
+                },
+            ],
+        }
+
+        router = LLMRouter(registry=_make_mock_registry(AsyncMock()))
+
+        chain = router._chain("media", media_type="voice")
+        assert chain == [("gemini", "audio-a")]

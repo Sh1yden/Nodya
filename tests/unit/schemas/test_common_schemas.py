@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from app.common.schemas import (
     IncomingMessage,
+    MediaDescriptor,
     OutgoingMessage,
     ScheduledEnvelope,
 )
@@ -71,6 +72,85 @@ class TestIncomingMessage:
         assert msg.chat_external_id == "-100500"
         assert msg.sender_name == "Иван"
         assert msg.sender_username == "ivan"
+
+    def test_legacy_media_payload_still_valid(self) -> None:
+        msg = IncomingMessage(
+            user_external_id="1",
+            channel="telegram",
+            text="смотри",
+            received_at=datetime.now(UTC),
+            media_type="photo",
+            media_file_id="file-1",
+            caption="подпись",
+        )
+        assert msg.media is None
+        assert msg.media_type == "photo"
+        assert msg.media_file_id == "file-1"
+        assert msg.caption == "подпись"
+
+    def test_media_descriptor_payload(self) -> None:
+        media = MediaDescriptor(
+            kind="sticker",
+            file_id="sticker-1",
+            thumbnail_file_id="thumb-1",
+            emoji="😂",
+            sticker_format="animated",
+            sticker_set_name="cats",
+        )
+        msg = IncomingMessage(
+            user_external_id="1",
+            channel="telegram",
+            text="",
+            received_at=datetime.now(UTC),
+            media=media,
+            media_type="sticker",
+            media_file_id="sticker-1",
+        )
+        assert msg.media == media
+        assert msg.media_type == "sticker"
+
+
+class TestMediaDescriptor:
+    """Validate the channel-agnostic media descriptor."""
+
+    def test_file_id_and_kind_required(self) -> None:
+        with pytest.raises(ValidationError):
+            MediaDescriptor(kind="photo")  # type: ignore[call-arg]
+        with pytest.raises(ValidationError):
+            MediaDescriptor(file_id="f")  # type: ignore[call-arg]
+
+    def test_invalid_kind_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            MediaDescriptor(kind="document", file_id="f")  # type: ignore[arg-type]
+
+    def test_all_kinds_accepted(self) -> None:
+        kinds = (
+            "photo",
+            "video",
+            "voice",
+            "audio",
+            "animation",
+            "sticker",
+            "video_note",
+        )
+        for kind in kinds:
+            media = MediaDescriptor(kind=kind, file_id=f"id-{kind}")
+            assert media.kind == kind
+
+    def test_round_trip(self) -> None:
+        media = MediaDescriptor(
+            kind="video",
+            file_id="video-1",
+            thumbnail_file_id="thumb-1",
+            mime_type="video/mp4",
+            width=1280,
+            height=720,
+            duration_seconds=12,
+            file_size=1024,
+            file_name="clip.mp4",
+        )
+        restored = MediaDescriptor.model_validate(media.model_dump())
+        assert restored == media
 
 
 class TestOutgoingMessage:

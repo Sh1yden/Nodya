@@ -18,8 +18,11 @@ from .broker import (
 from .schemas import (
     Channel,
     IncomingMessage,
+    MediaDescriptor,
+    MediaKind,
     OutgoingMessage,
     ScheduledEnvelope,
+    StickerFormat,
     TypingEvent,
 )
 
@@ -35,8 +38,11 @@ __all__ = [
     "ROUTING_TYPING",
     "Channel",
     "IncomingMessage",
+    "MediaDescriptor",
+    "MediaKind",
     "OutgoingMessage",
     "ScheduledEnvelope",
+    "StickerFormat",
     "TypingEvent",
     "declare_incoming_queue",
     "declare_outgoing_queue",

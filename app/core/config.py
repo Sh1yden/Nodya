@@ -59,6 +59,11 @@ class SettingsSchema(BaseSettings):
     VECTOR_SEARCH_LIMIT: int = Field(default=5)
     FACTS_MIN_CONFIDENCE: float = Field(default=0.4)
 
+    # Media recognition (vision)
+    MEDIA_IMAGE_MAX_BYTES: int = Field(default=5 * 1024 * 1024)
+    MEDIA_DESCRIPTION_MAX_CHARS: int = Field(default=400)
+    MEDIA_MAX_PER_BATCH: int = Field(default=10)
+
     # AI APIs
     GEMINI_API_KEY: str = Field(default="")
     OPENROUTER_API_KEY: str = Field(default="")
@@ -148,6 +153,18 @@ class SettingsSchema(BaseSettings):
                 {
                     "provider": "gemini_cloudflare",
                     "models": "gemini-embedding-2",
+                },
+            ],
+            "media": [
+                {
+                    "provider": "gemini_cloudflare",
+                    "models": "gemini-3.5-flash-lite,gemini-3.6-flash",
+                    "modalities": "image",
+                },
+                {
+                    "provider": "gemini",
+                    "models": "gemini-3.5-flash-lite",
+                    "modalities": "image",
                 },
             ],
         }

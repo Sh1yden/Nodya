@@ -15,7 +15,6 @@ processing every SCHEDULED_POLL_SECONDS (ADR-13).
 """
 
 import asyncio
-import base64
 import re
 import time
 from contextlib import suppress
@@ -36,11 +35,12 @@ from sqlalchemy.exc import IntegrityError
 
 from app.api.messaging import MessagePublisher
 from app.brain import build_interlocutor_block, load_system_prompt
-from app.brain.llm_choice import ChatContentPart, ChatMessage, LLMRouter
+from app.brain.llm_choice import ChatMessage, LLMRouter
 from app.brain.memory.short import ContextMessage, RedisClient
 from app.brain.memory.vector import VectorMemory
 from app.brain.models import HardFacts, Messages, Users
 from app.brain.repositories import HardFactsRepo, UsersRepo
+from app.brain.vision import MediaRecognizer
 from app.common import (
     IncomingMessage,
     OutgoingMessage,
@@ -53,6 +53,7 @@ from app.core import LoggerMixin, settings
 
 _PREFETCH_COUNT = 50
 _THINKING_TTL_SECONDS = 300
+_BATCH_LOCK_TTL_SECONDS = 180
 _LINK_COMMAND_PATTERN = re.compile(
     r"^/(?:link|start)\s+([A-Za-z0-9]{6,12})$", re.IGNORECASE
 )
@@ -88,6 +89,7 @@ class Worker(LoggerMixin):
         publisher: MessagePublisher,
         router: LLMRouter,
         vectors: VectorMemory,
+        media_recognizer: MediaRecognizer | None = None,
     ) -> None:
         """Store collaborators; no I/O happens here.
 
@@ -98,6 +100,8 @@ class Worker(LoggerMixin):
             publisher: Outgoing publisher into RabbitMQ.
             router: LLM router used for dialogue generation.
             vectors: Qdrant-backed long-term fact memory.
+            media_recognizer: Optional vision describer; None
+                disables media enrichment.
         """
         self._url = broker_url
         self._redis = redis_client
@@ -105,6 +109,7 @@ class Worker(LoggerMixin):
         self._publisher = publisher
         self._router = router
         self._vectors = vectors
+        self._media_recognizer = media_recognizer
         self._connection: AbstractRobustConnection | None = None
         self._channel: AbstractRobustChannel | None = None
         self._queue: AbstractRobustQueue | None = None
@@ -391,7 +396,9 @@ class Worker(LoggerMixin):
             sender_name=first.sender_name,
             sender_username=first.sender_username,
         )
-        lock_token = await self._redis.acquire_lock(user.user_id)
+        lock_token = await self._redis.acquire_lock(
+            user.user_id, ttl=_BATCH_LOCK_TTL_SECONDS
+        )
         if lock_token is None:
             self._lg.warning(
                 f"Lock busy for user_id={user.user_id}, postponing "
@@ -472,8 +479,9 @@ class Worker(LoggerMixin):
             user_id, "thinking", ttl=_THINKING_TTL_SECONDS
         )
         self._lg.debug(f"State thinking: user_id={user_id}")
-        outgoing = await self._handle_dtos(user, dtos)
-        await self._save_dialog_context(user_id, dtos, outgoing)
+        enriched = await self._enrich_dtos(dtos)
+        outgoing = await self._handle_dtos(user, dtos, enriched_texts=enriched)
+        await self._save_dialog_context(user_id, enriched, outgoing)
         await self._redis.set_state(user_id, "idle")
         self._lg.debug(f"State idle: user_id={user_id}")
         return outgoing
@@ -494,20 +502,20 @@ class Worker(LoggerMixin):
     async def _save_dialog_context(
         self,
         user_id: UUID,
-        incoming: list[IncomingMessage],
+        incoming_texts: list[str],
         outgoing: list[OutgoingMessage],
     ) -> None:
         """Persist the turn into short-term history (ADR-10).
 
         Args:
             user_id: Internal user UUID.
-            incoming: User messages of the batch.
+            incoming_texts: Enriched user messages of the batch.
             outgoing: Replies published for the batch.
         """
         now = datetime.now(UTC)
         context: list[ContextMessage] = [
-            ContextMessage(role="user", content=d.text, timestamp=now)
-            for d in incoming
+            ContextMessage(role="user", content=text, timestamp=now)
+            for text in incoming_texts
         ]
         context += [
             ContextMessage(role="assistant", content=o.text, timestamp=now)
@@ -519,7 +527,10 @@ class Worker(LoggerMixin):
             self._lg.error(f"Context not saved for {user_id}: {exc}")
 
     async def _handle_dtos(
-        self, user: Users, dtos: list[IncomingMessage]
+        self,
+        user: Users,
+        dtos: list[IncomingMessage],
+        enriched_texts: list[str] | None = None,
     ) -> list[OutgoingMessage]:
         """Generate one reply for the whole batch (ADR-12 debounce).
 
@@ -530,6 +541,8 @@ class Worker(LoggerMixin):
         Args:
             user: Interlocutor owning the dialogue.
             dtos: Batch messages to answer.
+            enriched_texts: Texts with media markers; None means
+                enrich here (direct calls outside the batch cycle).
 
         Returns:
             The single published reply wrapped in a list.
@@ -537,16 +550,9 @@ class Worker(LoggerMixin):
         user_id = user.user_id
         limit = settings.LLM_HISTORY_LIMIT or _HISTORY_LIMIT_FALLBACK
         history = await self._redis.get_context(user_id, limit=limit)
-        batch_text = "\n".join(d.text for d in dtos)
-
-        # Media pre-processing: fetch and describe photo/video/voice
-        media_info = await self._describe_media(dtos)
-        if media_info:
-            # Concatenate caption + description as per best practice
-            if batch_text:
-                batch_text = f"{batch_text}\n{media_info}"
-            else:
-                batch_text = media_info
+        if enriched_texts is None:
+            enriched_texts = await self._enrich_dtos(dtos)
+        batch_text = "\n".join(t for t in enriched_texts if t)
 
         display_name = self._display_name(user)
         is_owner = user.role == "owner"
@@ -595,8 +601,43 @@ class Worker(LoggerMixin):
             chat_external_id=dtos[0].chat_external_id,
         )
         await self._publisher.publish_outgoing(outgoing)
-        await self._archive_batch(user_id, incoming=dtos, outgoing=[outgoing])
+        await self._archive_batch(
+            user_id,
+            incoming=dtos,
+            incoming_texts=enriched_texts,
+            outgoing=[outgoing],
+        )
         return [outgoing]
+
+    async def _enrich_dtos(self, dtos: list[IncomingMessage]) -> list[str]:
+        """Attach media descriptions to each DTO text once per batch.
+
+        The marker ends up in both the dialogue prompt and the Redis
+        history, so the next turn remembers what was on the image.
+
+        Args:
+            dtos: Batch messages as received from the channel.
+
+        Returns:
+            Texts aligned with ``dtos``, each with an optional media
+            marker appended on a new line.
+        """
+        if self._media_recognizer is None:
+            return [d.text for d in dtos]
+        try:
+            descriptions = await self._media_recognizer.describe_many(dtos)
+        except Exception as exc:
+            self._lg.error(f"Media enrichment failed: {exc}")
+            return [d.text for d in dtos]
+        enriched: list[str] = []
+        for dto, description in zip(dtos, descriptions, strict=True):
+            if not description:
+                enriched.append(dto.text)
+            elif dto.text:
+                enriched.append(f"{dto.text}\n{description}")
+            else:
+                enriched.append(description)
+        return enriched
 
     async def _long_term_block(self, user: Users, batch_text: str) -> str:
         """Assemble long-term memory lines for the system prompt.
@@ -650,69 +691,11 @@ class Worker(LoggerMixin):
         parts += fact_lines + hit_lines
         return "\n".join(parts)
 
-    async def _describe_media(self, dtos: list[IncomingMessage]) -> str | None:
-        """Fetch and describe attached media (photo) via media role.
-
-        Returns:
-            Concatenated description lines like ``[photo: ...]``,
-            or None when no media or all fetches failed.
-        """
-        descriptions: list[str] = []
-        for dto in dtos:
-            if not dto.media_file_id or not dto.media_type:
-                continue
-            # Only photo supported in M1; others gracefully ignored for now
-            if dto.media_type != "photo":
-                descriptions.append(f"[{dto.media_type} not yet supported]")
-                continue
-            try:
-                from app.chats.media_fetcher import fetch_telegram_media
-
-                data, mime = await fetch_telegram_media(dto.media_file_id)
-                b64 = base64.b64encode(data).decode()
-                # Hard 20MB limit already enforced in fetcher
-                self._lg.debug(
-                    f"Media fetched: type={dto.media_type} "
-                    f"size={len(data)} mime={mime}"
-                )
-                chat: list[ChatMessage] = [
-                    ChatMessage(
-                        role="user",
-                        content=[
-                            ChatContentPart(
-                                type="image_url",
-                                inline_data=b64,
-                                mime_type=mime,
-                            ),
-                            ChatContentPart(
-                                type="text",
-                                text=(
-                                    "Describe this image concisely in the "
-                                    "user's language: what is shown, any "
-                                    "text visible, mood."
-                                ),
-                            ),
-                        ],
-                    )
-                ]
-                resp = await self._router.generate_with_fallback("media", chat)
-                desc = (resp.text or "").strip()
-                if not desc:
-                    desc = "image (no description)"
-                descriptions.append(f"[photo: {desc}]")
-            except Exception as exc:
-                self._lg.warning(
-                    f"Media describe failed for {dto.media_file_id}: {exc}"
-                )
-                descriptions.append("[photo: не смог разобрать фото]")
-        if not descriptions:
-            return None
-        return "\n".join(descriptions)
-
     async def _archive_batch(
         self,
         user_id: UUID,
         incoming: list[IncomingMessage],
+        incoming_texts: list[str],
         outgoing: list[OutgoingMessage],
     ) -> None:
         """Write the batch into the messages archive (ADR-14).
@@ -723,6 +706,7 @@ class Worker(LoggerMixin):
         Args:
             user_id: Internal user UUID.
             incoming: User messages of the batch.
+            incoming_texts: Enriched texts aligned with ``incoming``.
             outgoing: Replies published for the batch.
         """
         rows = [
@@ -730,10 +714,14 @@ class Worker(LoggerMixin):
                 user_id=user_id,
                 direction="incoming",
                 channel=dto.channel,
-                text=dto.text,
-                source_kind=dto.media_type or "text",
+                text=text,
+                source_kind=(
+                    dto.media.kind
+                    if dto.media is not None
+                    else dto.media_type or "text"
+                ),
             )
-            for dto in incoming
+            for dto, text in zip(incoming, incoming_texts, strict=True)
         ]
         rows += [
             Messages(
@@ -949,7 +937,9 @@ class Worker(LoggerMixin):
             sender_name=first.sender_name,
             sender_username=first.sender_username,
         )
-        lock_token = await self._redis.acquire_lock(user.user_id)
+        lock_token = await self._redis.acquire_lock(
+            user.user_id, ttl=_BATCH_LOCK_TTL_SECONDS
+        )
         if lock_token is None:
             await self._defer_incoming(
                 dtos, [], retry=envelope.retry_count + 1

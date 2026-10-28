@@ -49,3 +49,21 @@ class TestSettingsSchema:
         """TELEGRAM_WEBHOOK_SECRET must be provided via env."""
         field = SettingsSchema.model_fields["TELEGRAM_WEBHOOK_SECRET"]
         assert field.is_required()
+
+    def test_default_media_chain_exists(self, settings: object) -> None:
+        chains: dict = settings.LLM_PROVIDER_CHAINS  # type: ignore[attr-defined]
+        assert "media" in chains
+        providers = [item["provider"] for item in chains["media"]]
+        assert providers[0] == "gemini_cloudflare"
+        assert "openrouter" not in providers
+
+    def test_media_limits_defaults(self, settings: object) -> None:
+        assert (
+            settings.MEDIA_IMAGE_MAX_BYTES  # type: ignore[attr-defined]
+            == 5 * 1024 * 1024
+        )
+        assert (
+            settings.MEDIA_DESCRIPTION_MAX_CHARS  # type: ignore[attr-defined]
+            == 400
+        )
+        assert settings.MEDIA_MAX_PER_BATCH == 10  # type: ignore[attr-defined]

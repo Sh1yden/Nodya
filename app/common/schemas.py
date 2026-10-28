@@ -11,6 +11,38 @@ from uuid import UUID
 from pydantic import BaseModel
 
 Channel = Literal["telegram", "discord", "browser", "cli"]
+MediaKind = Literal[
+    "photo",
+    "video",
+    "voice",
+    "audio",
+    "animation",
+    "sticker",
+    "video_note",
+]
+StickerFormat = Literal["static", "animated", "video"]
+
+
+class MediaDescriptor(BaseModel):
+    """Channel-agnostic description of an attached media item.
+
+    Binaries never cross the queue: the descriptor carries channel
+    file ids and metadata, and the recognition module downloads only
+    the frame it needs (the image itself or a thumbnail).
+    """
+
+    kind: MediaKind
+    file_id: str
+    thumbnail_file_id: str | None = None
+    mime_type: str | None = None
+    width: int | None = None
+    height: int | None = None
+    duration_seconds: int | None = None
+    file_size: int | None = None
+    emoji: str | None = None
+    sticker_format: StickerFormat | None = None
+    sticker_set_name: str | None = None
+    file_name: str | None = None
 
 
 class IncomingMessage(BaseModel):
@@ -18,8 +50,9 @@ class IncomingMessage(BaseModel):
 
     ``user_external_id`` identifies the sender, ``chat_external_id``
     is where the reply must be delivered (they differ in group
-    chats). Photo/video/voice carry ``media_*`` + optional caption;
-    ``text`` is the caption or plain text.
+    chats). Media carries ``media`` (plus legacy ``media_type`` /
+    ``media_file_id`` for old queued payloads); ``text`` is the
+    caption or plain text.
     """
 
     user_external_id: str
@@ -29,7 +62,8 @@ class IncomingMessage(BaseModel):
     chat_external_id: str | None = None
     sender_name: str | None = None
     sender_username: str | None = None
-    media_type: Literal["photo", "video", "voice", "audio"] | None = None
+    media: MediaDescriptor | None = None
+    media_type: MediaKind | None = None
     media_file_id: str | None = None
     caption: str | None = None
 

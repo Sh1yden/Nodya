@@ -7,12 +7,11 @@ Update parsing and IncomingMessage publishing (receive-only principle).
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
 
-from aiogram.types import Update
+from aiogram.types import Message, PhotoSize, Update
 from fastapi import APIRouter, HTTPException, Request, status
 
-from app.common import IncomingMessage
+from app.common import IncomingMessage, MediaDescriptor
 from app.core import get_logger, settings
 
 logger = get_logger(__name__)
@@ -21,7 +20,7 @@ router = APIRouter()
 
 _SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token"
 
-MediaType = Literal["photo", "video", "voice", "audio"]
+_MAX_PHOTO_WIDTH = 1280
 
 
 @dataclass(slots=True)
@@ -31,8 +30,7 @@ class _ParsedMessage:
     chat_id: int | None
     sender_id: int | None
     text: str
-    media_type: MediaType | None
-    file_id: str | None
+    media: MediaDescriptor | None
     caption: str | None
     sender_name: str | None
     sender_username: str | None
@@ -74,8 +72,8 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
     parsed = _extract_message(update)
     if parsed.chat_id is None or parsed.sender_id is None:
         return {"status": "ignored"}
-    # Allow photo/video/voice with empty text but with media
-    if not parsed.text and parsed.media_type is None:
+    # Allow any media with empty text (stickers have no caption).
+    if not parsed.text and parsed.media is None:
         logger.debug(f"Ignored non-text update: chat_id={parsed.chat_id}")
         return {"status": "ignored"}
 
@@ -87,8 +85,9 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
         received_at=datetime.now(UTC),
         sender_name=parsed.sender_name,
         sender_username=parsed.sender_username,
-        media_type=parsed.media_type,
-        media_file_id=parsed.file_id,
+        media=parsed.media,
+        media_type=parsed.media.kind if parsed.media else None,
+        media_file_id=parsed.media.file_id if parsed.media else None,
         caption=parsed.caption,
     )
     await publisher.publish_incoming(message)
@@ -127,7 +126,7 @@ def _extract_message(update: Update) -> _ParsedMessage:
         update carries no message. ``sender_id`` falls back to the
         chat id for channel posts without ``from_user``.
     """
-    empty = _ParsedMessage(None, None, "", None, None, None, None, None)
+    empty = _ParsedMessage(None, None, "", None, None, None, None)
     if update.message is None:
         return empty
 
@@ -145,45 +144,183 @@ def _extract_message(update: Update) -> _ParsedMessage:
     text = (msg.text or "").strip()
     caption = (msg.caption or "").strip() or None
 
-    def _make(
-        media_type: MediaType | None = None,
-        file_id: str | None = None,
-        body: str | None = None,
-    ) -> _ParsedMessage:
+    if text:
         return _ParsedMessage(
-            chat_id=chat_id,
-            sender_id=sender_id,
-            text=body if body is not None else text,
-            media_type=media_type,
-            file_id=file_id,
-            caption=caption,
-            sender_name=sender_name,
-            sender_username=sender_username,
+            chat_id,
+            sender_id,
+            text,
+            None,
+            caption,
+            sender_name,
+            sender_username,
         )
 
-    if text:
-        return _make()
-
-    if msg.photo:
-        # photo is list[PhotoSize], last is biggest
-        return _make("photo", msg.photo[-1].file_id, caption or "")
-
-    if msg.video and msg.video.file_id:
-        return _make("video", msg.video.file_id, caption or "")
-
-    if msg.voice and msg.voice.file_id:
-        return _make("voice", msg.voice.file_id, caption or "")
-
-    if msg.audio and msg.audio.file_id:
-        return _make("audio", msg.audio.file_id, caption or "")
-
-    if msg.document and msg.document.file_id:
-        # Fallback: treat document as photo if mime image
-        mime = msg.document.mime_type or ""
-        if mime.startswith("image/"):
-            return _make("photo", msg.document.file_id, caption or "")
+    media = _descriptor_from_message(msg)
+    if media is not None:
+        return _ParsedMessage(
+            chat_id,
+            sender_id,
+            caption or "",
+            media,
+            caption,
+            sender_name,
+            sender_username,
+        )
 
     if caption is not None:
-        return _make(body=caption)
+        return _ParsedMessage(
+            chat_id,
+            sender_id,
+            caption,
+            None,
+            caption,
+            sender_name,
+            sender_username,
+        )
 
     return empty
+
+
+def _descriptor_from_message(msg: Message) -> MediaDescriptor | None:
+    """Normalize Telegram media into a channel-agnostic descriptor.
+
+    Animation is checked before document because Telegram also
+    duplicates GIF messages into ``document``. For video-like kinds
+    only the thumbnail is exposed to vision; the main file is never
+    fetched.
+
+    Args:
+        msg: Telegram message with at most one media attachment.
+
+    Returns:
+        Media descriptor, or None for text/unsupported attachments.
+    """
+    if msg.animation is not None:
+        item = msg.animation
+        return MediaDescriptor(
+            kind="animation",
+            file_id=item.file_id,
+            thumbnail_file_id=_thumb_id(item.thumbnail),
+            mime_type=item.mime_type,
+            width=item.width,
+            height=item.height,
+            duration_seconds=item.duration,
+            file_size=item.file_size,
+            file_name=item.file_name,
+        )
+
+    if msg.photo:
+        photo = _pick_photo(msg.photo)
+        return MediaDescriptor(
+            kind="photo",
+            file_id=photo.file_id,
+            width=photo.width,
+            height=photo.height,
+            file_size=photo.file_size,
+        )
+
+    if msg.video is not None:
+        item = msg.video
+        return MediaDescriptor(
+            kind="video",
+            file_id=item.file_id,
+            thumbnail_file_id=_thumb_id(item.thumbnail),
+            mime_type=item.mime_type,
+            width=item.width,
+            height=item.height,
+            duration_seconds=item.duration,
+            file_size=item.file_size,
+            file_name=item.file_name,
+        )
+
+    if msg.video_note is not None:
+        item = msg.video_note
+        return MediaDescriptor(
+            kind="video_note",
+            file_id=item.file_id,
+            thumbnail_file_id=_thumb_id(item.thumbnail),
+            width=item.length,
+            height=item.length,
+            duration_seconds=item.duration,
+            file_size=item.file_size,
+        )
+
+    if msg.sticker is not None:
+        item = msg.sticker
+        if item.is_animated:
+            sticker_format = "animated"
+        elif item.is_video:
+            sticker_format = "video"
+        else:
+            sticker_format = "static"
+        return MediaDescriptor(
+            kind="sticker",
+            file_id=item.file_id,
+            thumbnail_file_id=_thumb_id(item.thumbnail),
+            width=item.width,
+            height=item.height,
+            file_size=item.file_size,
+            emoji=item.emoji,
+            sticker_format=sticker_format,
+            sticker_set_name=item.set_name,
+        )
+
+    if msg.voice is not None:
+        item = msg.voice
+        return MediaDescriptor(
+            kind="voice",
+            file_id=item.file_id,
+            mime_type=item.mime_type,
+            duration_seconds=item.duration,
+            file_size=item.file_size,
+        )
+
+    if msg.audio is not None:
+        item = msg.audio
+        return MediaDescriptor(
+            kind="audio",
+            file_id=item.file_id,
+            thumbnail_file_id=_thumb_id(item.thumbnail),
+            mime_type=item.mime_type,
+            duration_seconds=item.duration,
+            file_size=item.file_size,
+            file_name=item.file_name,
+        )
+
+    if msg.document is not None:
+        item = msg.document
+        if (item.mime_type or "").startswith("image/"):
+            return MediaDescriptor(
+                kind="photo",
+                file_id=item.file_id,
+                thumbnail_file_id=_thumb_id(item.thumbnail),
+                mime_type=item.mime_type,
+                file_size=item.file_size,
+                file_name=item.file_name,
+            )
+
+    return None
+
+
+def _pick_photo(
+    photos: list[PhotoSize], max_width: int = _MAX_PHOTO_WIDTH
+) -> PhotoSize:
+    """Pick the largest photo that fits the vision budget.
+
+    Args:
+        photos: Telegram photo sizes, smallest to largest.
+        max_width: Preferred upper bound on width.
+
+    Returns:
+        Largest fitting size, or the smallest one when all exceed
+        the bound (keeps the payload small).
+    """
+    fitting = [p for p in photos if p.width <= max_width]
+    if fitting:
+        return max(fitting, key=lambda p: p.width * p.height)
+    return min(photos, key=lambda p: p.width * p.height)
+
+
+def _thumb_id(thumbnail: PhotoSize | None) -> str | None:
+    """Return a thumbnail file id when Telegram provided one."""
+    return thumbnail.file_id if thumbnail is not None else None

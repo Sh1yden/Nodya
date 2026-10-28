@@ -58,15 +58,22 @@ class LLMRouter(LoggerMixin):
         result: list[tuple[str, str]] = []
         for item in chain_config:
             if role == "media" and media_type:
-                mods = item.get("modalities", "")
+                mods_raw = item.get("modalities") or ""
                 # modalities may be "image,audio,video" or list
-                if isinstance(mods, str):
-                    mods = [m.strip().lower() for m in mods.split(",")]
+                if isinstance(mods_raw, str):
+                    mods = [
+                        m.strip().lower()
+                        for m in mods_raw.split(",")
+                        if m.strip()
+                    ]
+                else:
+                    mods = [str(m).lower() for m in mods_raw]
                 # map photo->image for convenience
                 alias = {"photo": "image", "voice": "audio"}.get(
                     media_type, media_type
                 )
-                if alias not in [m.lower() for m in mods]:
+                # An empty modalities list means "any modality".
+                if mods and alias not in mods:
                     continue
             provider_name = item["provider"]
             models = _split_models(item["models"])

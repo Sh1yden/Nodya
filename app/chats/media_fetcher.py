@@ -9,6 +9,19 @@ logger = get_logger(__name__)
 _MAX_MEDIA_BYTES = 20 * 1024 * 1024
 _TELEGRAM_FILE_URL = "https://api.telegram.org/file/bot{token}/{path}"
 _TELEGRAM_GET_FILE_URL = "https://api.telegram.org/bot{token}/getFile"
+_MIME_BY_SUFFIX = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".ogg": "audio/ogg",
+    ".oga": "audio/ogg",
+    ".mp3": "audio/mpeg",
+    ".tgs": "application/x-tgsticker",
+}
 
 
 async def fetch_telegram_media(file_id: str) -> tuple[bytes, str]:
@@ -52,17 +65,9 @@ async def fetch_telegram_media(file_id: str) -> tuple[bytes, str]:
             raise ValueError(f"Downloaded file too large: {len(content)}")
 
         # Guess MIME
-        mime = "image/jpeg"
-        if file_path.endswith(".mp4"):
-            mime = "video/mp4"
-        elif file_path.endswith(".ogg") or file_path.endswith(".oga"):
-            mime = "audio/ogg"
-        elif file_path.endswith(".mp3"):
-            mime = "audio/mpeg"
-        elif file_path.endswith(".webp"):
-            mime = "image/webp"
-        elif file_path.endswith(".png"):
-            mime = "image/png"
+        dot = file_path.rfind(".")
+        suffix = file_path[dot:].lower() if dot != -1 else ""
+        mime = _MIME_BY_SUFFIX.get(suffix, "application/octet-stream")
 
         logger.debug(f"Fetched Telegram media {file_id}: {len(content)} bytes")
         return content, mime
