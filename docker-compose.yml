@@ -39,6 +39,8 @@ services:
       start_period: 15s
     env_file:
       - .env
+    volumes:
+      - ./app/brain/memory/init/prompts:/app/app/brain/memory/init/prompts:ro
 
   postgres:
     container_name: nodya_long_memory
