@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from app.brain.models import (
     AuditLogs,
+    ErrorEvents,
     FeedSources,
     HardFacts,
     Users,
@@ -16,6 +19,8 @@ from app.brain.models import (
 from app.brain.repositories import (
     AuditLogsRepo,
     BaseRepo,
+    ErrorEventsRepo,
+    ErrorEventUpsert,
     FeedSourcesRepo,
     HardFactsRepo,
     UsersRepo,
@@ -183,3 +188,77 @@ class TestAuditLogsRepo:
         session = AsyncMock()
         repo = AuditLogsRepo(session)
         assert repo.model is AuditLogs
+
+
+class TestErrorEventsRepo:
+    def _event(self) -> ErrorEventUpsert:
+        return ErrorEventUpsert(
+            fingerprint="f" * 64,
+            level="ERROR",
+            logger="nodya.worker",
+            module="app.brain.worker",
+            function="handle",
+            message="boom",
+            seen_at=datetime.now(UTC),
+        )
+
+    def test_init_sets_model(self) -> None:
+        session = AsyncMock()
+        repo = ErrorEventsRepo(session)
+        assert repo.model is ErrorEvents
+
+    async def test_upsert_many_skips_empty_batch(self) -> None:
+        session = AsyncMock()
+        await ErrorEventsRepo(session).upsert_many([])
+        session.execute.assert_not_awaited()
+
+    async def test_upsert_many_builds_on_conflict(self) -> None:
+        session = AsyncMock()
+        await ErrorEventsRepo(session).upsert_many([self._event()])
+
+        session.execute.assert_awaited_once()
+        stmt = session.execute.await_args.args[0]
+        sql = str(stmt.compile(dialect=postgresql.dialect()))
+        assert "ON CONFLICT (fingerprint) DO UPDATE" in sql
+        assert "greatest" in sql.lower()
+        assert "error_events.count + excluded.count" in sql
+
+    async def test_list_recent_filters_and_limits(self) -> None:
+        session = AsyncMock()
+        rows = [MagicMock(), MagicMock()]
+        session.scalars = AsyncMock(return_value=rows)
+
+        result = await ErrorEventsRepo(session).list_recent(
+            limit=10, level="ERROR"
+        )
+
+        assert result == rows
+        stmt = session.scalars.await_args.args[0]
+        sql = str(stmt.compile(dialect=postgresql.dialect()))
+        assert "error_events.level =" in sql
+        assert "LIMIT" in sql
+        assert "ORDER BY error_events.last_seen DESC" in sql
+
+    async def test_get_by_fingerprint_delegates(
+        self,
+    ) -> None:
+        session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = "row"
+        session.execute = AsyncMock(return_value=mock_result)
+
+        result = await ErrorEventsRepo(session).get_by_fingerprint("f" * 64)
+
+        assert result == "row"
+        session.execute.assert_awaited_once()
+
+    async def test_delete_older_than_returns_rowcount(self) -> None:
+        session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.rowcount = 4
+        session.execute = AsyncMock(return_value=mock_result)
+
+        deleted = await ErrorEventsRepo(session).delete_older_than(30)
+
+        assert deleted == 4
+        session.execute.assert_awaited_once()

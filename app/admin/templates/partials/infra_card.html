@@ -1,0 +1,39 @@
+<section class="card">
+  <h2>Хранилища</h2>
+  <dl class="kv">
+    <dt>PostgreSQL</dt>
+    <dd>
+      {%- if postgres.ok -%}
+        {{ postgres.data.database_size_bytes|bytes }},
+        соединений: {{ postgres.data.active_connections if postgres.data.active_connections is not none else '—' }}
+      {%- else -%}
+        <span class="error-text">{{ postgres.error or 'Нет данных' }}</span>
+      {%- endif -%}
+    </dd>
+    <dt>Redis</dt>
+    <dd>
+      {%- if redis_stats.ok -%}
+        {{ redis_stats.data.used_memory_bytes|bytes }},
+        клиентов: {{ redis_stats.data.connected_clients if redis_stats.data.connected_clients is not none else '—' }},
+        uptime {{ redis_stats.data.uptime_seconds|uptime }}
+      {%- else -%}
+        <span class="error-text">{{ redis_stats.error or 'Нет данных' }}</span>
+      {%- endif -%}
+    </dd>
+    <dt>Qdrant</dt>
+    <dd>
+      {%- if qdrant.ok -%}
+        {% for coll in qdrant.data -%}
+          {{ coll.name }}: {{ coll.points_count if coll.points_count is not none else '—' }} точек{% if not loop.last %}<br>{% endif %}
+        {%- else -%}
+          коллекций нет
+        {%- endfor -%}
+      {%- else -%}
+        <span class="error-text">{{ qdrant.error or 'Нет данных' }}</span>
+      {%- endif -%}
+    </dd>
+  </dl>
+  {% if postgres.stale or redis_stats.stale or qdrant.stale %}
+    <p class="small muted">Часть данных из кеша.</p>
+  {% endif %}
+</section>

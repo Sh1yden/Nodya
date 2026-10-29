@@ -231,3 +231,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Observability secrets
+observability/grafana.env
+
+# secrets of admins rights
+secrets.md
+./secrects.md
+

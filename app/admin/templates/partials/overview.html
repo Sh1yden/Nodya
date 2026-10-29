@@ -1,0 +1,15 @@
+<div class="grid three">
+  {% include "partials/runtime_card.html" %}
+  {% include "partials/deps_card.html" %}
+  {% include "partials/infra_card.html" %}
+</div>
+<div class="grid two">
+  <section class="card">
+    <h2>Очереди <a class="small muted" href="/queues">все →</a></h2>
+    {% include "partials/queues_table.html" %}
+  </section>
+  <section class="card">
+    <h2>Последние ошибки <a class="small muted" href="/errors">все →</a></h2>
+    {% include "partials/errors_table.html" %}
+  </section>
+</div>

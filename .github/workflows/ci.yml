@@ -52,6 +52,8 @@ jobs:
       - name: Import smoke test
         run: |
           uv run python -c "
+          import app.admin
+          import app.admin.main
           import app.brain.models
           import app.brain.repositories
           import app.brain.llm_choice
@@ -63,6 +65,10 @@ jobs:
           import app.chats.telegram
           import app.common
           import app.core
+          import app.core.error_sink
+          import app.core.log_retention
+          import app.core.metrics
+          import app.core.runtime_status
           import app.worker
           import app.main
           print('All core packages import cleanly')

@@ -1,0 +1,22 @@
+{% if container %}
+<section class="card">
+  <dl class="kv">
+    <dt>Имя</dt><dd><code>{{ container.name }}</code></dd>
+    <dt>Состояние</dt>
+    <dd><span class="chip {{ container|container_class }}">{{ container.state }}</span> {{ container.status }}</dd>
+    <dt>Health</dt>
+    <dd>
+      {%- if container.health -%}
+        <span class="chip {{ container.health|status_class }}">{{ container.health }}</span>
+      {%- else -%}—{%- endif -%}
+    </dd>
+    <dt>Образ</dt><dd>{{ container.image }}</dd>
+    <dt>ID</dt><dd><code>{{ container.id }}</code></dd>
+    <dt>Старт</dt><dd>{{ container.started_at|dt }}</dd>
+    <dt>Перезапуски</dt><dd>{{ container.restart_count if container.restart_count is not none else '—' }}</dd>
+    <dt>Порты</dt><dd>{% if container.ports %}{{ container.ports|join(', ') }}{% else %}—{% endif %}</dd>
+  </dl>
+</section>
+{% else %}
+<p class="error-text">Контейнер не найден.</p>
+{% endif %}

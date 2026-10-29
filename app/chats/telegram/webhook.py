@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 
 from app.common import IncomingMessage, MediaDescriptor
 from app.core import get_logger, settings
+from app.core.metrics import WEBHOOK_UPDATES
 
 logger = get_logger(__name__)
 
@@ -64,6 +65,7 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
         update = Update.model_validate(raw_update)
     except ValueError:
         logger.warning("Rejected malformed Telegram webhook payload.")
+        WEBHOOK_UPDATES.labels(result="invalid").inc()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="invalid update",
@@ -71,10 +73,12 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
 
     parsed = _extract_message(update)
     if parsed.chat_id is None or parsed.sender_id is None:
+        WEBHOOK_UPDATES.labels(result="ignored").inc()
         return {"status": "ignored"}
     # Allow any media with empty text (stickers have no caption).
     if not parsed.text and parsed.media is None:
         logger.debug(f"Ignored non-text update: chat_id={parsed.chat_id}")
+        WEBHOOK_UPDATES.labels(result="ignored").inc()
         return {"status": "ignored"}
 
     message = IncomingMessage(
@@ -91,6 +95,7 @@ async def telegram_webhook(request: Request) -> dict[str, str]:
         caption=parsed.caption,
     )
     await publisher.publish_incoming(message)
+    WEBHOOK_UPDATES.labels(result="accepted").inc()
     logger.debug(
         f"Update accepted: sender_id={parsed.sender_id}, "
         f"chat_id={parsed.chat_id}, len={len(parsed.text)}"

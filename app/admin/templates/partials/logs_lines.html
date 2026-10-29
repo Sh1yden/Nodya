@@ -1,0 +1,20 @@
+{% if logs and logs.ok %}
+  {% set slice = logs.data %}
+  {% if slice.entries %}
+<p class="small muted">
+  Показано {{ slice.entries|length }} из {{ slice.scanned }} строк
+  {%- if slice.truncated %} · прочитан хвост файла{% endif %}
+</p>
+<pre class="logs">{% for e in slice.entries %}<span class="log-line"><span class="log-time">{{ e.timestamp }}</span> <span class="chip {{ e.level|level_class }}">{{ e.level }}</span> <span class="log-logger">{{ e.logger }}</span> {{ e.message }}</span>{{ "\n" }}{% endfor %}</pre>
+{% for e in slice.entries if e.exception %}
+<details class="card small">
+  <summary>{{ e.timestamp }} · {{ e.logger }} — traceback</summary>
+  <pre class="traceback">{{ e.exception }}</pre>
+</details>
+{% endfor %}
+  {% else %}
+<p class="muted">Записей не найдено.</p>
+  {% endif %}
+{% elif logs %}
+<p class="error-text">{{ logs.error or 'Логи недоступны' }}</p>
+{% endif %}

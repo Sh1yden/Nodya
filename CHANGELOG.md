@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-10-29 — D9 (админ-панель и observability)
+
+### Admin panel
+- Новый пакет `app/admin/`: read-only панель на Jinja2 + htmx (vendored), отдельный контейнер `nodya_admin` из того же образа (`uvicorn app.admin.main:app --port 8016`), без host-портов
+- Страницы: обзор (heartbeat, зависимости, контейнеры, очереди, ошибки, PG/Redis/Qdrant), контейнеры и карточка с логами, очереди (включая DLQ), сгруппированные ошибки, JSONL-логи с фильтрами
+- Owner-логин (argon2id), сессия в Redis (`nodya:admin:session:<sha256>`, TTL 720 мин), rate limit 5/15 мин на хеш IP, `Origin`-проверка POST, cookie `HttpOnly/Secure/Lax`, fail-closed 503 при недоступном Redis
+- CSP `default-src 'self'`, `X-Frame-Options: DENY`, `nosniff`, `no-referrer`, `Cache-Control: no-store`, `TrustedHostMiddleware`, `/docs` отключены
+- Коллекторы Docker/RabbitMQ/PG/Redis/Qdrant/логов с TTL-кешем и stale-on-error; Docker API только через `docker-socket-proxy` (`POST=0`, allowlist inspect-полей)
+
+### Error pipeline
+- Таблица `error_events` (миграция `a1f4c9d2e7b3`) и `ErrorEventsRepo` с upsert по fingerprint
+- `ErrorEventSink`: `nodya.*` ERROR+ → bounded queue → батчевый drainer → PostgreSQL; fingerprint по нормализованному сообщению, redaction токенов/паролей, обрезка message/traceback, TTL `ERROR_EVENTS_TTL_DAYS`
+- Счётчики `nodya_error_sink_events_total`
+
+### Metrics, heartbeat, logs
+- `app/core/metrics.py`: webhook/worker/LLM/scheduler/error sink, гистограмма латентности LLM, внутренний HTTP-сервер на `8015`
+- Heartbeat в Redis (`nodya:runtime:heartbeat`, TTL 90 c) с pid/version/расписанием задач
+- `prune_logs`: удаление JSONL старше `LOG_RETENTION_DAYS` (14 d) ежедневной задачей
+
+### Compose / observability
+- `x-logging` (json-file 10m×3) на всех сервисах; app-порт `127.0.0.1:8014`; `stop_grace_period`
+- `docker-proxy` (tecnativa v0.5.0), сети `docker_api`/`monitoring` (internal), тома для стека
+- Prometheus v3.7.3 (30 d/2 GB), Loki 3.6.3 (14 d), Alloy v1.11.3 (docker-логи + JSONL без дублей), cAdvisor v0.52.1, redis-exporter v1.76.0, postgres-exporter v0.18.1, Grafana 12.3.1 (внутренний порт 3002, 3 провижен-дашборда, Cloudflare Access снаружи)
+- `.dockerignore` исключает `logs/`, `observability/`, `.coverage`; `observability/grafana.env` в `.gitignore`
+
+### Docs / CI
+- Новые `docs/ADMIN_PANEL.md` и `docs/OBSERVABILITY.md`; обновлены `ARCHITECTURE_FULL.md` (ADR-20…24), `README_PROJECT.md`, `TODO_MASTER.md`
+- CI: smoke-import `app.admin`, `app.core.error_sink/metrics/runtime_status/log_retention`
+- 80 тестов админ-панели (unit + TestClient), проверки конфигов Prometheus/Loki/Alloy
+
 ## 2026-10-29 — медиа: подробные описания
 
 ### Vision

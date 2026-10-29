@@ -1,0 +1,34 @@
+<section class="card">
+  <h2>Приложение</h2>
+  {% if runtime.ok %}
+    {% set rt = runtime.data %}
+    <p>
+      <span class="chip {{ rt.status|status_class }}">
+        {%- if rt.status == 'healthy' %}работает
+        {%- elif rt.status == 'stale' %}heartbeat устарел
+        {%- else %}нет heartbeat{% endif -%}
+      </span>
+      {% if runtime.stale %}<span class="chip warn">кеш</span>{% endif %}
+      {% if rt.age_seconds is not none %}<span class="small muted">{{ rt.age_seconds|uptime }} назад</span>{% endif %}
+    </p>
+    {% if rt.payload %}
+      <dl class="kv">
+        <dt>Версия</dt><dd>{{ rt.payload.version or '—' }}</dd>
+        <dt>PID</dt><dd>{{ rt.payload.pid or '—' }}</dd>
+        <dt>Старт</dt><dd>{{ rt.payload.started_at|iso }}</dd>
+      </dl>
+      {% if rt.payload.jobs %}
+        <table class="table compact">
+          <thead><tr><th>Задача</th><th>Следующий запуск</th></tr></thead>
+          <tbody>
+          {% for job in rt.payload.jobs %}
+            <tr><td>{{ job.id }}</td><td class="nowrap">{{ job.next_run|iso }}</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+    {% endif %}
+  {% else %}
+    <p class="error-text">{{ runtime.error or 'Нет данных' }}</p>
+  {% endif %}
+</section>

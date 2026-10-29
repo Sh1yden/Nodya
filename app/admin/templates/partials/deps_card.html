@@ -1,0 +1,17 @@
+<section class="card">
+  <h2>Зависимости</h2>
+  {% if deps.ok %}
+    <ul class="status-list">
+    {% for dep in deps.data %}
+      <li>
+        <span class="dot {{ 'ok' if dep.ok else 'bad' }}"></span>
+        {{ dep_labels.get(dep.name, dep.name) }}
+        <span class="muted right">{{ 'доступен' if dep.ok else 'недоступен' }}</span>
+      </li>
+    {% endfor %}
+    </ul>
+    {% if deps.stale %}<p class="small muted">Данные из кеша.</p>{% endif %}
+  {% else %}
+    <p class="error-text">{{ deps.error or 'Нет данных' }}</p>
+  {% endif %}
+</section>

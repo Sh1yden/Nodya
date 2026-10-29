@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Не найдено · Nodya Admin{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>404</h1>
+  <p>{{ message }}</p>
+  {% if detail %}<p class="small error-text">{{ detail }}</p>{% endif %}
+  <p><a href="/">← на главную</a></p>
+</section>
+{% endblock %}

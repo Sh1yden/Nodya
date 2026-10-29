@@ -7,6 +7,7 @@ through RedisClient.
 Path in the project: app/brain/memory/short/redis.py
 """
 
+import json
 import secrets
 from datetime import UTC, datetime
 from typing import Literal
@@ -28,6 +29,9 @@ _SCHEDULED_KEY = "nodya:scheduled"
 _LINK_PREFIX = "nodya:link"
 _FEED_SEEN_PREFIX = "nodya:feed_seen"
 _QUOTA_PREFIX = "nodya:quota"
+_ADMIN_SESSION_PREFIX = "nodya:admin:session"
+_ADMIN_LOGIN_FAIL_PREFIX = "nodya:admin:login_fail"
+_RUNTIME_HEARTBEAT_KEY = "nodya:runtime:heartbeat"
 LINK_TTL_SECONDS = 600
 _LINK_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
@@ -203,6 +207,17 @@ class RedisClient:
         except Exception as exc:
             logger.warning(f"Redis unreachable: {exc}")
             return False
+
+    async def info(self, section: str | None = None) -> dict:
+        """Return Redis INFO fields (admin panel diagnostics).
+
+        Args:
+            section: Optional INFO section (memory, clients, ...).
+
+        Returns:
+            Parsed INFO mapping.
+        """
+        return await self._redis.info(section)
 
     # --- Scheduled (ADR-13/15) ---
 
@@ -536,3 +551,120 @@ class RedisClient:
             True when the presence key exists.
         """
         return bool(await self._redis.exists(_agent_online_key(user_id)))
+
+    # --- Admin panel sessions ---
+
+    async def set_admin_session(
+        self, token_hash: str, payload: dict, ttl: int
+    ) -> None:
+        """Store an admin session payload under the token hash.
+
+        Args:
+            token_hash: sha256 hex digest of the session cookie token.
+            payload: JSON-serializable session data (user, role, ...).
+            ttl: Session lifetime in seconds.
+        """
+        await self._redis.set(
+            f"{_ADMIN_SESSION_PREFIX}:{token_hash}",
+            json.dumps(payload),
+            ex=ttl,
+        )
+
+    async def get_admin_session(self, token_hash: str) -> dict | None:
+        """Load an admin session; damaged JSON is treated as absent.
+
+        Args:
+            token_hash: sha256 hex digest of the session cookie token.
+
+        Returns:
+            Session payload, or None when missing/expired/damaged.
+        """
+        key = f"{_ADMIN_SESSION_PREFIX}:{token_hash}"
+        raw = await self._redis.get(key)
+        if raw is None:
+            return None
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            await self._redis.delete(key)
+            return None
+        return data if isinstance(data, dict) else None
+
+    async def delete_admin_session(self, token_hash: str) -> None:
+        """Drop an admin session (logout).
+
+        Args:
+            token_hash: sha256 hex digest of the session cookie token.
+        """
+        await self._redis.delete(f"{_ADMIN_SESSION_PREFIX}:{token_hash}")
+
+    async def register_login_failure(self, ip_hash: str, ttl: int) -> int:
+        """Count a failed admin login within a fixed window.
+
+        Args:
+            ip_hash: Hashed client IP (raw addresses are never stored).
+            ttl: Window length in seconds, applied on the first hit.
+
+        Returns:
+            Failures registered in the current window.
+        """
+        key = f"{_ADMIN_LOGIN_FAIL_PREFIX}:{ip_hash}"
+        count = int(await self._redis.incr(key))
+        if count == 1:
+            await self._redis.expire(key, ttl)
+        return count
+
+    async def reset_login_failures(self, ip_hash: str) -> None:
+        """Clear the failure counter after a successful login.
+
+        Args:
+            ip_hash: Hashed client IP.
+        """
+        await self._redis.delete(f"{_ADMIN_LOGIN_FAIL_PREFIX}:{ip_hash}")
+
+    async def get_login_failures(self, ip_hash: str) -> int:
+        """Read the failure count of the current login window.
+
+        Args:
+            ip_hash: Hashed client IP.
+
+        Returns:
+            Failures registered so far; 0 when the window is gone.
+        """
+        raw = await self._redis.get(f"{_ADMIN_LOGIN_FAIL_PREFIX}:{ip_hash}")
+        try:
+            return int(raw) if raw is not None else 0
+        except ValueError:
+            return 0
+
+    # --- Runtime heartbeat ---
+
+    async def set_runtime_heartbeat(self, payload: dict, ttl: int) -> None:
+        """Publish the runtime heartbeat payload with a TTL.
+
+        Args:
+            payload: JSON-serializable process state.
+            ttl: Key expiry seconds (must exceed the refresh interval).
+        """
+        await self._redis.set(
+            _RUNTIME_HEARTBEAT_KEY, json.dumps(payload), ex=ttl
+        )
+
+    async def get_runtime_heartbeat(self) -> dict | None:
+        """Read the runtime heartbeat of the application process.
+
+        Returns:
+            Heartbeat payload, or None when missing/damaged.
+        """
+        raw = await self._redis.get(_RUNTIME_HEARTBEAT_KEY)
+        if raw is None:
+            return None
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    async def delete_runtime_heartbeat(self) -> None:
+        """Remove the heartbeat key (graceful shutdown)."""
+        await self._redis.delete(_RUNTIME_HEARTBEAT_KEY)

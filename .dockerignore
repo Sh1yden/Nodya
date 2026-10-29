@@ -13,6 +13,14 @@ venv/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+.coverage
+.qoder/
+
+# Runtime data
+logs/
+
+# Observability stack (runs from host compose, not in the app image)
+observability/
 
 # Secrets — .env никогда не должен попадать в образ
 .env

@@ -154,7 +154,8 @@ class TGSender(LoggerMixin):
                 # further requeue loops.
                 self._lg.error(
                     f"Telegram API error for user_id={dto.user_id}: "
-                    f"{exc} — dropping."
+                    f"{exc} — dropping.",
+                    exc_info=True,
                 )
                 await message.nack(requeue=False)
                 return

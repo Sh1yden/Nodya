@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Обзор · Nodya Admin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Обзор</h1>
+  <span class="small muted">обновляется автоматически</span>
+</div>
+<div id="overview" hx-get="/partials/overview" hx-trigger="every 10s" hx-swap="innerHTML">
+  {% include "partials/overview.html" %}
+</div>
+<section class="panel">
+  <h2>Контейнеры</h2>
+  <div id="containers" hx-get="/partials/containers" hx-trigger="every 5s" hx-swap="innerHTML">
+    {% include "partials/containers_table.html" %}
+  </div>
+</section>
+{% endblock %}

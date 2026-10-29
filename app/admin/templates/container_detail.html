@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}{{ container.service }} · Nodya Admin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>{{ container.service }}</h1>
+  <a href="/containers" class="muted">← все контейнеры</a>
+</div>
+<div id="container-status" hx-get="/partials/container/{{ container.service|urlencode }}" hx-trigger="every 5s" hx-swap="innerHTML">
+  {% include "partials/container_status.html" %}
+</div>
+<h2>Логи · последние 200 строк</h2>
+<div id="container-logs" hx-get="/partials/container/{{ container.service|urlencode }}/logs" hx-trigger="every 3s" hx-swap="innerHTML">
+  {% include "partials/container_logs.html" %}
+</div>
+{% endblock %}

@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Контейнеры · Nodya Admin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Контейнеры</h1>
+  <span class="small muted">compose-проект nodya, обновление каждые 5 с</span>
+</div>
+<section class="panel">
+  <div id="containers" hx-get="/partials/containers" hx-trigger="every 5s" hx-swap="innerHTML">
+    {% include "partials/containers_table.html" %}
+  </div>
+</section>
+{% endblock %}

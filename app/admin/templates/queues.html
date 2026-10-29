@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Очереди · Nodya Admin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Очереди RabbitMQ</h1>
+  <span class="small muted">обновление каждые 5 с</span>
+</div>
+<section class="panel">
+  <div id="queues" hx-get="/partials/queues" hx-trigger="every 5s" hx-swap="innerHTML">
+    {% include "partials/queues_table.html" %}
+  </div>
+</section>
+<p class="small muted">
+  Глубина читается passive declare. Unacked-сообщения в v1 не показываются —
+  история доступна в Grafana (rabbitmq_prometheus).
+</p>
+{% endblock %}

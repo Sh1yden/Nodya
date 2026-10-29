@@ -1,0 +1,19 @@
+# Local access only, never used in production.
+# Publish admin and Grafana on 127.0.0.1 and relax HTTPS-only cookies.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d admin grafana
+#   docker compose up -d admin grafana   # revert to tunnel-only mode
+services:
+  admin:
+    ports:
+      - "127.0.0.1:8016:8016"
+    environment:
+      ADMIN_COOKIE_SECURE: "false"
+      ADMIN_PUBLIC_ORIGIN: "http://localhost:8016"
+
+  grafana:
+    ports:
+      - "127.0.0.1:3002:3002"
+    environment:
+      GF_SERVER_ROOT_URL: "http://localhost:3002"
+      GF_SERVER_COOKIE_SECURE: "false"

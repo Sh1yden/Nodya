@@ -49,6 +49,11 @@
 | **Хэширование паролей** | argon2-cffi | Argon2id для паролей и токенов |
 | **Конфигурация** | Pydantic Settings | .env + типизированные настройки |
 | **Логирование** | Кастомный логгер (stdout + JSONL) | Консоль (цветной) + файловые ротации в JSONL |
+| **Админ-панель** | FastAPI + Jinja2 + htmx (vendored) | Read-only мониторинг: контейнеры, очереди, ошибки, логи |
+| **Метрики** | prometheus-client | Внутренний `:8015`, история — Prometheus |
+| **Агрегация логов** | Grafana Alloy + Loki | docker-логи + JSONL, retention 14 дней |
+| **Дашборды** | Grafana | Метрики/логи/контейнеры за Cloudflare Access |
+| **Docker API** | docker-socket-proxy | Read-only доступ admin/alloy (`POST=0`) |
 
 ---
 
@@ -62,7 +67,21 @@ nodya/
 │   │   ├── config.py             # Pydantic Settings (SettingsSchema)
 │   │   ├── logger.py             # get_logger(), LoggerMixin
 │   │   ├── logger_config.py      # setup_logging(), форматтеры
+│   │   ├── metrics.py            # prometheus-client + :8015
+│   │   ├── error_sink.py         # ERROR+ -> error_events
+│   │   ├── runtime_status.py     # heartbeat в Redis
+│   │   ├── log_retention.py      # prune JSONL
 │   │   └── __init__.py           # re-export
+│   │
+│   ├── admin/                    # Read-only панель (отдельный процесс :8016)
+│   │   ├── main.py               # create_app(), headers, lifespan
+│   │   ├── services.py           # AdminServices + TTL-кеш
+│   │   ├── auth.py               # login/logout, Principal, rate limit
+│   │   ├── deps.py               # require_owner, origin check
+│   │   ├── collectors/           # docker, broker, infra, logs, errors, runtime
+│   │   ├── routes/               # pages, auth, partials, health
+│   │   ├── templates/            # Jinja2
+│   │   └── static/               # admin.css, htmx.min.js
 │   │
 │   ├── chats/                    # Каналы: приём + доставка вместе
 │   │   └── telegram/             # webhook (POST /webhook/telegram) + TGSender
@@ -103,6 +122,7 @@ nodya/
 │
 ├── tests/
 ├── docs/
+├── observability/                # Prometheus, Loki, Alloy, Grafana provisioning
 ├── logs/
 ├── Dockerfile
 ├── docker-compose.yml
@@ -656,6 +676,46 @@ class SkillRegistry:
 - Квоты уведомлений — `consume_daily_quota` (Redis `INCR`+`EXPIRE 86400`,
   ключ по UTC-дате); при исчерпании новость попадает только в Qdrant
 
+### 5.8 Админ-панель (`app/admin/`)
+
+Отдельный процесс `uvicorn app.admin.main:app --port 8016` из того же
+образа (`nodya_admin`), read-only. Не импортирует `app.main`, не
+запускает worker, не делает fail-fast; при лежащих зависимостях страницы
+деградируют частично.
+
+- `create_app()` — собственное FastAPI-приложение: `TrustedHostMiddleware`
+  по `ADMIN_ALLOWED_HOSTS`, CSP `default-src 'self'; frame-ancestors
+  'none'`, `X-Frame-Options: DENY`, `nosniff`, `no-referrer`,
+  `Cache-Control: no-store`; `docs`/`openapi` отключены.
+- Auth (ADR-20): owner-логин, argon2id, сессия в Redis
+  (`nodya:admin:session:<sha256>`), cookie `HttpOnly`/`Secure`/`Lax`;
+  лимит 5 неудач/15 мин на хеш IP; `Origin`-проверка на POST.
+- Коллекторы (`collectors/`): docker (через socket-proxy), broker
+  (passive declare очередей), infra (PG/Redis/Qdrant), logs (JSONL),
+  errors (`error_events`), runtime (Redis heartbeat). Каждый возвращает
+  `Result(data|None, error, fetched_at, stale)`; TTL-кеш 2–10 c,
+  stale до 60 c (ADR-22).
+- UI: Jinja2 + htmx (vendored в `static/`, без CDN), тёмная тема,
+  polling partial'ов 3–10 c.
+- Гарантии: Docker inspect — allowlist полей, `Config.Env` не
+  рендерится; RabbitMQ — только passive declare; SQL — только SELECT.
+- Подробности: `docs/ADMIN_PANEL.md`.
+
+### 5.9 Observability (`app/core/metrics.py`, `observability/`)
+
+- Метрики prometheus-client в default registry; daemon-thread HTTP server
+  на внутреннем `METRICS_PORT=8015` (не публикуется, tunnel не
+  маршрутизирует). `OSError` при bind логируется и не роняет app.
+- Счётчики: webhook/worker/LLM/scheduler/error sink; гистограмма
+  латентности LLM; `Info` с версией. Метки без user/chat id.
+- Heartbeat: задача раз в 30 c пишет `nodya:runtime:heartbeat` (TTL 90 c)
+  с pid/version/started_at/расписанием APScheduler; панель считает
+  healthy ≤75 c, stale 75–90 c, missing.
+- Стек (ADR-23): Prometheus + Loki + Alloy + cAdvisor + exporters +
+  Grafana; Alloy читает docker-логи через socket-proxy (без
+  `nodya_heart`) и JSONL из `./logs` (ADR-24).
+- Подробности: `docs/OBSERVABILITY.md`.
+
 ---
 
 ## 6. Модели данных (целевые после фиксов)
@@ -740,6 +800,26 @@ class SkillRegistry:
 или автоматически (автоподхват ссылок и недельный `FeedDiscoveryJob`).
 Выключенные строки сохраняются: повторное добавление URL реактивирует запись,
 а discovery пропускает все известные URL. См. §5.7.
+
+### ErrorEvents (сгруппированные ошибки, D9)
+
+| Колонка | Тип | Ограничения | Назначение |
+|---|---|---|---|
+| `fingerprint` | `String(64)` | PK | sha256(logger:function:exception_type:normalize(message)) |
+| `level` | `String(16)` | NOT NULL | ERROR/CRITICAL |
+| `logger` | `String(128)` | NOT NULL | Имя логгера |
+| `module` | `String(128)` | nullable | Файл/модуль |
+| `function` | `String(128)` | nullable | Функция |
+| `exception_type` | `String(128)` | nullable | Класс исключения |
+| `message` | `Text` | NOT NULL | Обрезано 2k, redaction |
+| `traceback` | `Text` | nullable | Обрезано 8k, redaction |
+| `count` | `Integer` | server_default=1 | Число повторов (upsert `count + excluded.count`) |
+| `first_seen` | `DateTime(tz)` | NOT NULL | Первое появление группы |
+| `last_seen` | `DateTime(tz)` | NOT NULL, индекс | Последнее появление |
+
+Пишется `ErrorEventSink` (logging.Handler → asyncio.Queue → батчевый
+drainer), читается панелью `/errors`; старые строки удаляются ежедневно
+по `ERROR_EVENTS_TTL_DAYS`. См. §5.8.
 
 ---
 
@@ -844,6 +924,31 @@ class SkillRegistry:
 ### ADR-19: 3-уровневые LLM цепочки + `media` роль
 - **Контекст:** 2 уровня fallback недостаточно при деградации free-моделей; медиа (фото/видео/аудио) требует отдельной цепочки
 - **Решение:** Каждая роль теперь 3 уровня: `gemini_cloudflare` -> `openrouter nemotron` -> `openrouter haiku/llama/qwen` (разные под диалог/cs/bp). Новая роль `media` с `modalities` фильтрацией, `Messages.source_kind` отличает пересказ медиа от цитаты
+- **Статус:** Принято
+
+### ADR-20: Админ-сессия авторитетна в Redis
+- **Контекст:** панель должна открываться и работать при лежащем PostgreSQL, иначе теряется смысл мониторинга
+- **Решение:** в cookie — opaque-токен, в Redis — `hash_token(token)` + payload (username/role/created_at) с TTL; на каждый запрос БД не нужна. Redis недоступен → fail closed (503). Цена: смена роли owner применится после TTL/логаута (owner один, смена ручная)
+- **Статус:** Принято
+
+### ADR-21: Read-only Docker API через socket-proxy
+- **Контекст:** панели и Alloy нужен Docker API, но монтировать `docker.sock` в прикладной контейнер опасно
+- **Решение:** отдельный `tecnativa/docker-socket-proxy` с сокетом `:ro`, `POST=0`, разрешены только `CONTAINERS/NETWORKS/INFO/VERSION/PING/EVENTS` (`NETWORKS` — для discovery.docker у Alloy); сеть `docker_api` — `internal`, в ней только proxy, admin и alloy. Inspect-поля читаются по allowlist, `Config.Env`/`Cmd`/`Mounts.Source` не рендерятся
+- **Статус:** Принято
+
+### ADR-22: TTL-кеш со stale-on-error в панели
+- **Контекст:** опрос Docker/RabbitMQ/PG на каждый запрос дорог и умножается htmx-polling'ом; при недоступности источника страница не должна падать
+- **Решение:** `TTLCache` с per-key lock (2–10 c), негативный кеш 5 c, отдача последнего успешного результата до 60 c с флагом `stale`; ошибка коллектора рисуется карточкой, остальная страница живёт
+- **Статус:** Принято
+
+### ADR-23: Стек observability всегда включён
+- **Контекст:** compose profile'ы легко забыть включить, а история метрик и логи нужны постоянно
+- **Решение:** Prometheus/Loki/Alloy/cAdvisor/exporters/Grafana поднимаются вместе с приложением, без profile; наружу не публикуются, Grafana — через tunnel + Cloudflare Access. Образы запинены тегами, проверенными `docker manifest inspect`
+- **Статус:** Принято
+
+### ADR-24: Логи приложения в Loki только из JSONL-файлов
+- **Контекст:** `nodya_heart` пишет и в stdout (docker json-file), и в JSONL; сбор обоих даёт дубли
+- **Решение:** Alloy читает docker-логи всех контейнеров проекта, кроме `nodya_heart` (drop-правило), а логи приложения — только из `./logs/*.jsonl` через `loki.source.file` + `stage.json` (метки `level`, `module`). Время — ingestion (в JSONL только `HH:MM:SS`)
 - **Статус:** Принято
 
 ---
@@ -955,6 +1060,26 @@ class SettingsSchema(BaseSettings):
     SYSTEM_SKILLS_ENABLED: bool = False
     SANDBOX_ENABLED: bool = True
 
+    # --- Админ-панель (D9) ---
+    DOCKER_PROXY_URL: str = "http://docker-proxy:2375"
+    ADMIN_SESSION_TTL_MINUTES: int = 720
+    ADMIN_COOKIE_SECURE: bool = True
+    ADMIN_COMPOSE_PROJECT: str = "nodya"
+    ADMIN_LOGS_DIR: str = "logs"
+    ADMIN_PUBLIC_ORIGIN: str = "https://admin.nodya.shayden.ru"
+    ADMIN_ALLOWED_HOSTS: str = (
+        "admin.nodya.shayden.ru,localhost,127.0.0.1,testserver,nodya_admin"
+    )
+    GRAFANA_PUBLIC_URL: str = "https://grafana.nodya.shayden.ru"
+
+    # --- Observability ---
+    ERROR_EVENTS_ENABLED: bool = True
+    ERROR_EVENTS_TTL_DAYS: int = 30
+    METRICS_ENABLED: bool = True
+    METRICS_PORT: int = 8015
+    LOG_DIR: str = "logs"
+    LOG_RETENTION_DAYS: int = 14
+
     @computed_field
     @property
     def postgres_url(self) -> str: ...
@@ -1011,6 +1136,7 @@ class SettingsSchema(BaseSettings):
 | Unit | pytest + pytest-asyncio | Репозитории (in-memory SQLite или мок AsyncSession), сервисы (passwd), хэлперы |
 | Integration | pytest + testcontainers | Модели + реальная БД (поднятый PostgreSQL), Redis, RabbitMQ |
 | API | httpx (AsyncClient) | Эндпоинты FastAPI (с моками внешних сервисов) |
+| Admin | pytest + Starlette TestClient | Панель с подменённым `app.state.admin`: auth, cookie-флаги, 401/403/429, traversal, CSP/headers, escaping |
 | E2E | — | Ручное тестирование через Telegram-бота |
 
 ---
@@ -1028,6 +1154,9 @@ redis[hiredis]          # Redis (async)
 qdrant-client           # Qdrant client
 pydantic + pydantic-settings  # Валидация + конфиг
 httpx                   # HTTP-клиент для LLM/RSS
+jinja2                  # Шаблоны админ-панели
+python-multipart        # Form() в логине
+prometheus-client       # Метрики + внутренний :8015
 apscheduler             # Фоновые задачи
 argon2-cffi             # Хэширование
 pytest + pytest-asyncio # Тесты

@@ -1,0 +1,30 @@
+{% if containers.ok %}
+<table class="table">
+  <thead>
+    <tr>
+      <th>Сервис</th><th>Состояние</th><th>Health</th>
+      <th class="num">Restarts</th><th>Старт</th><th>Образ</th><th>ID</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for c in containers.data %}
+    <tr>
+      <td><a href="/containers/{{ c.service|urlencode }}">{{ c.service }}</a></td>
+      <td><span class="chip {{ c|container_class }}">{{ c.state }}</span></td>
+      <td>
+        {%- if c.health -%}
+          <span class="chip {{ c.health|status_class }}">{{ c.health }}</span>
+        {%- else -%}—{%- endif -%}
+      </td>
+      <td class="num">{{ c.restart_count if c.restart_count is not none else '—' }}</td>
+      <td class="nowrap">{{ c.started_at|dt }}</td>
+      <td class="small">{{ c.image }}</td>
+      <td><code class="small">{{ c.short_id }}</code></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% if containers.stale %}<p class="small muted">Данные из кеша.</p>{% endif %}
+{% else %}
+<p class="error-text">{{ containers.error or 'Нет данных' }}</p>
+{% endif %}

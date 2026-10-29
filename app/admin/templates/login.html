@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Вход · Nodya Admin{% endblock %}
+{% block content %}
+<div class="login-wrap">
+  <form class="card login-card" method="post" action="/login">
+    <h1>Nodya Admin</h1>
+    <p class="muted">Доступ только для владельца.</p>
+    {% if error %}<div class="alert {{ 'warn' if rate_limited else 'bad' }}">{{ error }}</div>{% endif %}
+    <input type="hidden" name="next" value="{{ next }}">
+    <label>Логин
+      <input name="username" autocomplete="username" required maxlength="64" autofocus>
+    </label>
+    <label>Пароль
+      <input type="password" name="password" autocomplete="current-password" required>
+    </label>
+    <button type="submit" class="primary">Войти</button>
+  </form>
+</div>
+{% endblock %}

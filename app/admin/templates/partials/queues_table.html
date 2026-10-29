@@ -1,0 +1,26 @@
+{% if queues.ok %}
+<table class="table">
+  <thead>
+    <tr><th>Очередь</th><th class="num">Ready</th><th class="num">Consumers</th><th>Состояние</th></tr>
+  </thead>
+  <tbody>
+  {% for queue in queues.data %}
+    <tr>
+      <td><code>{{ queue.name }}</code></td>
+      <td class="num">{{ queue.messages if queue.messages is not none else '—' }}</td>
+      <td class="num">{{ queue.consumers if queue.consumers is not none else '—' }}</td>
+      <td>
+        {%- if queue.error -%}
+          <span class="error-text">{{ queue.error }}</span>
+        {%- else -%}
+          <span class="chip ok">ok</span>
+        {%- endif -%}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% if queues.stale %}<p class="small muted">Данные из кеша.</p>{% endif %}
+{% else %}
+<p class="error-text">{{ queues.error or 'Нет данных' }}</p>
+{% endif %}

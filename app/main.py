@@ -5,9 +5,14 @@ Flow: Telegram -> webhook (app.chats.telegram) -> RabbitMQ(incoming)
 """
 
 import asyncio
+import logging
+import os
 from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime
+from pathlib import Path
 
 from aiogram import Bot
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, JobEvent
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 
@@ -33,7 +38,7 @@ from app.brain.memory.consolidation import ConsolidationJob
 from app.brain.memory.long import AsyncSessionLocal, engine
 from app.brain.memory.short import RedisClient
 from app.brain.memory.vector import VectorMemory
-from app.brain.repositories import HardFactsRepo
+from app.brain.repositories import ErrorEventsRepo, HardFactsRepo
 from app.brain.search import SearchChain
 from app.brain.skills import BackgroundParserJob
 from app.brain.vision import MediaRecognizer
@@ -41,10 +46,17 @@ from app.chats.media_fetcher import fetch_telegram_media
 from app.chats.telegram import TGSender
 from app.chats.telegram import router as telegram_webhook_router
 from app.core import get_logger, settings, setup_logging
+from app.core.error_sink import ErrorEventSink
+from app.core.log_retention import prune_logs
+from app.core.metrics import APP_INFO, SCHEDULER_RUNS, start_metrics_server
+from app.core.runtime_status import heartbeat_loop
 from app.worker import Worker
 
-setup_logging(level=settings.LOG_LEVEL)
+setup_logging(level=settings.LOG_LEVEL, log_dir=Path(settings.LOG_DIR))
 _lg = get_logger(__name__)
+
+_VERSION = os.environ.get("NODYA_VERSION", "dev")
+_STARTED_AT = datetime.now(UTC)
 
 
 @asynccontextmanager
@@ -57,6 +69,17 @@ async def lifespan(app: FastAPI):
     Yields:
         None once the application is fully running.
     """
+    error_sink: ErrorEventSink | None = None
+    if settings.ERROR_EVENTS_ENABLED:
+        error_sink = ErrorEventSink(AsyncSessionLocal)
+        error_sink.start()
+        logging.getLogger("nodya").addHandler(error_sink)
+        app.state.error_sink = error_sink
+
+    if settings.METRICS_ENABLED:
+        APP_INFO.info({"version": _VERSION})
+        start_metrics_server(settings.METRICS_PORT)
+
     await _fail_fast()
 
     registry = ProviderRegistry(settings)
@@ -149,6 +172,25 @@ async def lifespan(app: FastAPI):
         max_instances=1,
         coalesce=True,
     )
+    scheduler.add_job(
+        _error_events_cleanup,
+        "cron",
+        hour=3,
+        minute=15,
+        id="error-events-cleanup",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        _log_retention,
+        "cron",
+        hour=3,
+        minute=30,
+        id="log-retention",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_listener(_on_job_event, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
     sender = TGSender(
         broker_url=settings.rabbitmq_url,
         bot_token=settings.TELEGRAM_BOT_TOKEN,
@@ -171,8 +213,14 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(sender.run(), name="tg-sender"),
     ]
     scheduler.start()
+    heartbeat_task = asyncio.create_task(
+        heartbeat_loop(redis_client, lambda: _runtime_payload(scheduler)),
+        name="runtime-heartbeat",
+    )
     app.state.publisher = publisher
     app.state.redis = redis_client
+    app.state.scheduler = scheduler
+    app.state.worker = worker
     _lg.info(f"Nodya is up. Webhook: {base_url}/webhook/telegram")
 
     yield
@@ -182,6 +230,11 @@ async def lifespan(app: FastAPI):
     for task in background_tasks:
         task.cancel()
     await asyncio.gather(*background_tasks, return_exceptions=True)
+    heartbeat_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await heartbeat_task
+    with suppress(Exception):
+        await redis_client.delete_runtime_heartbeat()
     await worker.stop()
     await sender.stop()
 
@@ -195,9 +248,65 @@ async def lifespan(app: FastAPI):
     await search_chain.close()
     await redis_client.close()
     await vectors.close()
+    if error_sink is not None:
+        logging.getLogger("nodya").removeHandler(error_sink)
+        await error_sink.stop()
     await engine.dispose()
     if tunnel_process is not None:
         await asyncio.to_thread(stop_tunnel, tunnel_process)
+
+
+def _runtime_payload(scheduler: AsyncIOScheduler) -> dict:
+    """Build the heartbeat body published for the admin panel.
+
+    Args:
+        scheduler: Running scheduler whose jobs are reported.
+
+    Returns:
+        JSON-serializable process and schedule state.
+    """
+    return {
+        "pid": os.getpid(),
+        "version": _VERSION,
+        "started_at": _STARTED_AT.isoformat(),
+        "heartbeat_at": datetime.now(UTC).isoformat(),
+        "jobs": [
+            {
+                "id": job.id,
+                "next_run": (
+                    job.next_run_time.isoformat()
+                    if job.next_run_time is not None
+                    else None
+                ),
+            }
+            for job in scheduler.get_jobs()
+        ],
+    }
+
+
+def _on_job_event(event: JobEvent) -> None:
+    """Count scheduler job executions and failures."""
+    result = "error" if getattr(event, "exception", None) else "ok"
+    if event.job_id is not None:
+        SCHEDULER_RUNS.labels(job=event.job_id, result=result).inc()
+
+
+async def _error_events_cleanup() -> None:
+    """Drop error groups older than the retention window."""
+    async with AsyncSessionLocal() as session:
+        deleted = await ErrorEventsRepo(session).delete_older_than(
+            settings.ERROR_EVENTS_TTL_DAYS
+        )
+        await session.commit()
+    if deleted:
+        _lg.info(f"Error events retention removed {deleted} group(s).")
+
+
+async def _log_retention() -> None:
+    """Prune old JSONL files off the event loop."""
+    await asyncio.to_thread(
+        prune_logs, Path(settings.LOG_DIR), settings.LOG_RETENTION_DAYS
+    )
 
 
 async def _confidence_decay() -> None:

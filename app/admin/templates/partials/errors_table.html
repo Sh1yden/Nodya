@@ -1,0 +1,30 @@
+{% set current_level = level|default('') %}
+{% if errors.ok %}
+  {% if errors.data %}
+  <table class="table">
+    <thead>
+      <tr><th>Последний раз</th><th>Уровень</th><th class="num">×</th><th>Сообщение</th></tr>
+    </thead>
+    <tbody>
+    {% for err in errors.data %}
+      <tr>
+        <td class="nowrap">{{ err.last_seen|ago }}</td>
+        <td><span class="chip {{ err.level|level_class }}">{{ err.level }}</span></td>
+        <td class="num">{{ err.count }}</td>
+        <td>
+          <a href="/errors/{{ err.fingerprint }}">{{ err.message|truncate(120) }}</a>
+          <div class="small muted">
+            {{ err.logger }} · {{ err.function }}{% if err.exception_type %} · {{ err.exception_type }}{% endif %}
+          </div>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if errors.stale %}<p class="small muted">Данные из кеша.</p>{% endif %}
+  {% else %}
+  <p class="muted">Ошибок нет.</p>
+  {% endif %}
+{% else %}
+<p class="error-text">{{ errors.error or 'Нет данных' }}</p>
+{% endif %}

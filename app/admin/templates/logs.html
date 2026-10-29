@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Логи · Nodya Admin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Логи приложения</h1>
+  <span class="small muted">JSONL, обновление каждые 3 с</span>
+</div>
+{% if files and not files.ok %}
+<p class="error-text">{{ files.error }}</p>
+{% endif %}
+<div class="toolbar">
+  <div class="file-list">
+    {% for f in file_infos %}
+      <a class="chip {{ 'selected' if f.name == chosen else '' }}"
+         href="/logs?file={{ f.name|urlencode }}&level={{ level|urlencode }}&q={{ query|urlencode }}">
+        {{ f.name }} <span class="muted">{{ f.size_bytes|bytes }}</span>
+      </a>
+    {% else %}
+      <span class="muted">Файлов нет.</span>
+    {% endfor %}
+  </div>
+  <form class="filters" method="get" action="/logs">
+    <input type="hidden" name="file" value="{{ chosen }}">
+    <select name="level">
+      <option value="">Все уровни</option>
+      {% for lvl in levels %}
+        <option value="{{ lvl }}" {{ 'selected' if lvl == level else '' }}>{{ lvl }}</option>
+      {% endfor %}
+    </select>
+    <input type="search" name="q" value="{{ query }}" placeholder="подстрока" maxlength="200">
+    <button type="submit">Фильтр</button>
+  </form>
+</div>
+{% if chosen %}
+  <p class="small muted">
+    Файл {{ chosen }} · читается хвост ~512 КБ
+    {%- if logs and logs.ok and logs.data.truncated %} · показана только последняя часть файла{% endif %}
+  </p>
+  <div id="log-lines"
+       hx-get="/partials/logs?file={{ chosen|urlencode }}&level={{ level|urlencode }}&q={{ query|urlencode }}"
+       hx-trigger="every 3s" hx-swap="innerHTML">
+    {% if logs %}{% include "partials/logs_lines.html" %}{% endif %}
+  </div>
+{% else %}
+  <p class="muted">Нет доступных файлов логов.</p>
+{% endif %}
+{% endblock %}

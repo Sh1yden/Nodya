@@ -82,10 +82,66 @@ uv run uvicorn app.main:app --reload
 ### 4. Запуск (Docker Compose)
 
 ```bash
-docker-compose up -d
+cp observability/grafana.env.example observability/grafana.env
+# задайте GF_SECURITY_ADMIN_PASSWORD, остальное можно оставить как есть
+
+docker compose up -d --build
 ```
 
-Поднимет: `app` (FastAPI + Worker), `postgres`, `redis`, `rabbitmq`, `qdrant`.
+Поднимет:
+
+- `app` — FastAPI + Worker (`nodya_heart`, host-порт `127.0.0.1:8014`);
+- `postgres`, `redis`, `rabbitmq`, `qdrant`;
+- `admin` — read-only панель (`nodya_admin`, без host-портов, доступ
+  только через tunnel);
+- `docker-proxy` — socket-proxy с `POST=0` для admin/alloy;
+- стек observability: `prometheus`, `loki`, `alloy`, `cadvisor`,
+  `redis-exporter`, `postgres-exporter`, `grafana` (без host-портов).
+
+Все контейнеры пишут docker-логи с ротацией (`json-file`, 10 MB × 3),
+приложение — JSONL в `./logs` (14 дней). Метрики приложения отдаются на
+внутреннем порту `8015` (не публикуется).
+
+### 5. Админ-панель и Grafana
+
+Ingress в cloudflared BridgeNode:
+
+```yaml
+- hostname: admin.nodya.shayden.ru
+  service: http://nodya_admin:8016
+- hostname: grafana.nodya.shayden.ru
+  service: http://nodya_grafana:3002
+```
+
+- `admin.nodya.shayden.ru` — owner-логин (тот же пользователь, что
+  bootstrap; роль должна быть `owner`). Подробности — `docs/ADMIN_PANEL.md`.
+- `grafana.nodya.shayden.ru` — Cloudflare Access (owner-email) + логин
+  Grafana из `observability/grafana.env`. Дашборды и метрики —
+  `docs/OBSERVABILITY.md`.
+
+Локальная разработка панели без HTTPS:
+
+```dotenv
+ADMIN_COOKIE_SECURE=false
+ADMIN_PUBLIC_ORIGIN=http://localhost:8016
+ADMIN_ALLOWED_HOSTS=localhost,127.0.0.1
+```
+
+иначе браузер выбросит `Secure`-cookie и вход зациклится.
+
+То же самое для контейнеров — опциональный override
+`docker-compose.local.yml` публикует admin и Grafana только на
+`127.0.0.1`:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d admin grafana
+```
+
+- панель: `http://localhost:8016`
+- Grafana: `http://localhost:3002` (логин из `observability/grafana.env`)
+
+Возврат к боевому режиму (без host-портов, `Secure`-cookie):
+`docker compose up -d admin grafana`.
 
 ---
 
@@ -95,13 +151,15 @@ docker-compose up -d
 ├── app/                    # Nodya Core — основной сервер
 │   ├── main.py             # Точка входа: Gateway + фоновые задачи
 │   ├── worker.py           # Главный обработчик сообщений
-│   ├── core/               # Конфиг, логгер
+│   ├── core/               # Конфиг, логгер, метрики, error sink
 │   ├── api/                # auth, health, messaging, туннели
 │   ├── chats/              # Каналы: telegram/ (webhook + sender)
 │   ├── brain/              # "Мозг": модели, память, LLM, скиллы
+│   ├── admin/              # Read-only панель мониторинга (отдельный процесс)
 │   └── common/             # Общие DTO и топология брокера
 ├── agent/                  # Nodya Agent (опционально) — host-level скиллы
 ├── shared/                 # Общие схемы для RPC Core ↔ Agent
+├── observability/          # Prometheus, Loki, Alloy, Grafana provisioning
 ├── docs/                   # Документация
 ├── tests/                  # Тесты
 ├── docker-compose.yml

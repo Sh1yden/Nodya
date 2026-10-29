@@ -1,0 +1,11 @@
+{% if logs and logs.ok %}
+  {% if logs.data %}
+<pre class="logs">{% for line in logs.data %}<span class="log-line {{ 'stderr' if line.stream == 'stderr' else '' }}"><span class="log-time">{{ line.timestamp|dt }}</span> {{ line.message }}</span>{{ "\n" }}{% endfor %}</pre>
+  {% else %}
+<p class="muted">Логов пока нет.</p>
+  {% endif %}
+{% elif logs %}
+<p class="error-text">{{ logs.error or 'Логи недоступны' }}</p>
+{% else %}
+<p class="error-text">Контейнер не найден.</p>
+{% endif %}

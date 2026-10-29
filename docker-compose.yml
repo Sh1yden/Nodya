@@ -1,25 +1,47 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-app-build: &app-build
+  context: .
+  args:
+    - HTTP_PROXY
+    - HTTPS_PROXY
+    - NO_PROXY
+
+# Compose-network hostnames; .env keeps localhost for host-side runs.
+x-app-env: &app-env
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_PORT: "5672"
+  QDRANT_HOST: qdrant
+  QDRANT_PORT: "6333"
+
 services:
   app:
     container_name: nodya_heart
-    build:
-      context: .
-      args:
-        - HTTP_PROXY
-        - HTTPS_PROXY
-        - NO_PROXY
+    build: *app-build
+    image: nodya-app:local
+    restart: always
+    stop_grace_period: 30s
+    logging: *default-logging
     networks:
       - default
       - internet_bridge
-    restart: always
     environment:
-      - POSTGRES_HOST=postgres
-      - REDIS_HOST=redis
-      - POSTGRES_PORT=5432
-      - REDIS_PORT=6379
-      - RABBITMQ_HOST=rabbitmq
-      - RABBITMQ_PORT=5672
-      - QDRANT_HOST=qdrant
-      - QDRANT_PORT=6333
+      <<: *app-env
+      LOG_DIR: /app/logs
+      LOG_RETENTION_DAYS: "14"
+      ERROR_EVENTS_ENABLED: "true"
+      ERROR_EVENTS_TTL_DAYS: "30"
+      METRICS_ENABLED: "true"
+      METRICS_PORT: "8015"
+      NODYA_VERSION: local
     depends_on:
       postgres:
         condition: service_healthy
@@ -30,7 +52,9 @@ services:
       qdrant:
         condition: service_started
     ports:
-      - "8014:8014"
+      - "127.0.0.1:8014:8014"
+    expose:
+      - "8015"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import httpx; httpx.get('http://localhost:8014/health',timeout=3).raise_for_status()\""]
       interval: 30s
@@ -40,12 +64,200 @@ services:
     env_file:
       - .env
     volumes:
+      - ./logs:/app/logs
       - ./app/brain/memory/init/prompts:/app/app/brain/memory/init/prompts:ro
+
+  admin:
+    container_name: nodya_admin
+    build: *app-build
+    image: nodya-app:local
+    restart: always
+    stop_grace_period: 10s
+    logging: *default-logging
+    command:
+      - uvicorn
+      - app.admin.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8016"
+    env_file:
+      - .env
+    environment:
+      <<: *app-env
+      DOCKER_PROXY_URL: http://docker-proxy:2375
+      ADMIN_LOGS_DIR: /app/logs
+      METRICS_ENABLED: "false"
+      ERROR_EVENTS_ENABLED: "false"
+      NODYA_VERSION: local
+    networks:
+      - default
+      - docker_api
+      - internet_bridge
+    volumes:
+      - ./logs:/app/logs:ro
+    expose:
+      - "8016"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import httpx; httpx.get('http://localhost:8016/healthz',timeout=3).raise_for_status()\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  docker-proxy:
+    container_name: nodya_docker_proxy
+    image: tecnativa/docker-socket-proxy:v0.5.0
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      CONTAINERS: "1"
+      NETWORKS: "1"
+      INFO: "1"
+      VERSION: "1"
+      PING: "1"
+      EVENTS: "1"
+      POST: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker_api
+    security_opt:
+      - no-new-privileges:true
+
+  prometheus:
+    container_name: nodya_prometheus
+    image: prom/prometheus:v3.7.3
+    restart: unless-stopped
+    logging: *default-logging
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --storage.tsdb.retention.size=2GB
+      - --web.listen-address=0.0.0.0:9090
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - default
+      - monitoring
+    security_opt:
+      - no-new-privileges:true
+
+  loki:
+    container_name: nodya_loki
+    image: grafana/loki:3.6.3
+    restart: unless-stopped
+    logging: *default-logging
+    command: -config.file=/etc/loki/loki-config.yml
+    volumes:
+      - ./observability/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki_data:/loki
+    networks:
+      - monitoring
+    security_opt:
+      - no-new-privileges:true
+
+  alloy:
+    container_name: nodya_alloy
+    image: grafana/alloy:v1.11.3
+    restart: unless-stopped
+    logging: *default-logging
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - ./logs:/var/log/nodya:ro
+      - alloy_data:/var/lib/alloy/data
+    networks:
+      - docker_api
+      - monitoring
+    security_opt:
+      - no-new-privileges:true
+
+  cadvisor:
+    container_name: nodya_cadvisor
+    image: gcr.io/cadvisor/cadvisor:v0.52.1
+    restart: unless-stopped
+    logging: *default-logging
+    privileged: true
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=30s
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    devices:
+      - /dev/kmsg
+    networks:
+      - monitoring
+
+  redis-exporter:
+    container_name: nodya_redis_exporter
+    image: oliver006/redis_exporter:v1.76.0
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    networks:
+      - default
+      - monitoring
+    security_opt:
+      - no-new-privileges:true
+
+  postgres-exporter:
+    container_name: nodya_postgres_exporter
+    image: prometheuscommunity/postgres-exporter:v0.18.1
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      DATA_SOURCE_NAME: >-
+        postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+    networks:
+      - default
+      - monitoring
+    security_opt:
+      - no-new-privileges:true
+
+  grafana:
+    container_name: nodya_grafana
+    image: grafana/grafana:12.3.1
+    restart: unless-stopped
+    logging: *default-logging
+    # Internal port differs from :3000, which the host portfolio publishes.
+    environment:
+      GF_SERVER_HTTP_PORT: "3002"
+    # Optional so `docker compose config` works before the file is created;
+    # copy observability/grafana.env.example first (see docs/OBSERVABILITY.md).
+    env_file:
+      - path: ./observability/grafana.env
+        required: false
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    networks:
+      - monitoring
+      - internet_bridge
+    security_opt:
+      - no-new-privileges:true
 
   postgres:
     container_name: nodya_long_memory
     image: postgres:16-alpine
     restart: always
+    logging: *default-logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -69,6 +281,7 @@ services:
     container_name: nodya_short_memory
     image: redis:8-alpine
     restart: unless-stopped
+    logging: *default-logging
     command: >-
       redis-server --maxmemory 256mb --maxmemory-policy noeviction
       --appendonly yes
@@ -89,6 +302,7 @@ services:
     container_name: nodya_broker
     image: rabbitmq:4-alpine
     restart: unless-stopped
+    logging: *default-logging
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
@@ -107,6 +321,7 @@ services:
     container_name: nodya_vector
     image: qdrant/qdrant:latest
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "127.0.0.1:${QDRANT_PORT:-6333}:6333"
     volumes:
@@ -117,7 +332,15 @@ volumes:
   redis_data:
   rabbitmq_data:
   qdrant_data:
+  prometheus_data:
+  loki_data:
+  alloy_data:
+  grafana_data:
 
 networks:
   internet_bridge:
     external: true
+  docker_api:
+    internal: true
+  monitoring:
+    internal: true

@@ -6,8 +6,10 @@ fatal -> next immediately. Exhausted chain raises LLMError.
 """
 
 import asyncio
+import time
 
 from app.core import LoggerMixin, settings
+from app.core.metrics import LLM_LATENCY, LLM_REQUESTS
 
 from .base import (
     ChatMessage,
@@ -119,28 +121,49 @@ class LLMRouter(LoggerMixin):
                 # Registry import is lazy; catch KeyError and
                 # ProviderDisabledError (RuntimeError subclass).
                 last_error = exc
+                LLM_REQUESTS.labels(
+                    provider=provider_name, model=model, status="unavailable"
+                ).inc()
                 self._lg.warning(
-                    f"Candidate {provider_name}:{model} unavailable: {exc}"
+                    f"Candidate {provider_name}:{model} unavailable: {exc}",
+                    exc_info=True,
                 )
                 continue
+            started_at = time.monotonic()
             try:
                 response = await provider.generate(messages, model)
+            except LLMTransientError as exc:
+                LLM_REQUESTS.labels(
+                    provider=provider_name, model=model, status="transient"
+                ).inc()
+                last_error = exc
+                delay = _BACKOFF_BASE_SECONDS * (2**index)
+                self._lg.warning(
+                    f"Candidate {model} transient failure ({exc}); "
+                    f"pausing {delay:.1f}s.",
+                    exc_info=True,
+                )
+                await asyncio.sleep(delay)
+            except LLMError as exc:
+                LLM_REQUESTS.labels(
+                    provider=provider_name, model=model, status="error"
+                ).inc()
+                last_error = exc
+                self._lg.warning(
+                    f"Candidate {model} rejected: {exc}", exc_info=True
+                )
+            else:
+                LLM_REQUESTS.labels(
+                    provider=provider_name, model=model, status="ok"
+                ).inc()
+                LLM_LATENCY.labels(
+                    provider=provider_name, model=model
+                ).observe(time.monotonic() - started_at)
                 if index > 0:
                     self._lg.warning(
                         f"Role '{role}' served by fallback: {model}."
                     )
                 return response
-            except LLMTransientError as exc:
-                last_error = exc
-                delay = _BACKOFF_BASE_SECONDS * (2**index)
-                self._lg.warning(
-                    f"Candidate {model} transient failure ({exc}); "
-                    f"pausing {delay:.1f}s."
-                )
-                await asyncio.sleep(delay)
-            except LLMError as exc:
-                last_error = exc
-                self._lg.warning(f"Candidate {model} rejected: {exc}")
         raise LLMError(
             f"All candidates of role '{role}' exhausted: {last_error}"
         )
@@ -166,17 +189,35 @@ class LLMRouter(LoggerMixin):
                 provider = self._registry.get(provider_name)
             except (KeyError, Exception) as exc:
                 last_error = exc
+                LLM_REQUESTS.labels(
+                    provider=provider_name, model=model, status="unavailable"
+                ).inc()
                 self._lg.warning(
                     f"Embedding candidate {provider_name}:{model} "
-                    f"unavailable: {exc}"
+                    f"unavailable: {exc}",
+                    exc_info=True,
                 )
                 continue
+            started_at = time.monotonic()
             try:
-                return await provider.embed(texts, model)
+                result = await provider.embed(texts, model)
             except LLMError as exc:
+                LLM_REQUESTS.labels(
+                    provider=provider_name, model=model, status="error"
+                ).inc()
                 last_error = exc
-                self._lg.warning(f"Embedding candidate {model} failed: {exc}")
+                self._lg.warning(
+                    f"Embedding candidate {model} failed: {exc}",
+                    exc_info=True,
+                )
                 continue
+            LLM_REQUESTS.labels(
+                provider=provider_name, model=model, status="ok"
+            ).inc()
+            LLM_LATENCY.labels(provider=provider_name, model=model).observe(
+                time.monotonic() - started_at
+            )
+            return result
         raise LLMError(f"All embedding candidates failed: {last_error}")
 
     async def close(self) -> None:

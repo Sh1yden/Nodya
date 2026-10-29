@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from app.core.config import SettingsSchema
 
@@ -67,3 +68,49 @@ class TestSettingsSchema:
             == 600
         )
         assert settings.MEDIA_MAX_PER_BATCH == 10  # type: ignore[attr-defined]
+
+    def test_logging_defaults(self, settings: object) -> None:
+        assert settings.LOG_DIR == "logs"  # type: ignore[attr-defined]
+        assert settings.LOG_RETENTION_DAYS == 14  # type: ignore[attr-defined]
+
+    def test_admin_defaults(self, settings: object) -> None:
+        assert (
+            settings.DOCKER_PROXY_URL  # type: ignore[attr-defined]
+            == "http://docker-proxy:2375"
+        )
+        assert (
+            settings.ADMIN_SESSION_TTL_MINUTES  # type: ignore[attr-defined]
+            == 720
+        )
+        assert settings.ADMIN_COOKIE_SECURE is True  # type: ignore[attr-defined]
+        assert settings.ADMIN_COMPOSE_PROJECT == "nodya"  # type: ignore[attr-defined]
+        assert (
+            settings.ADMIN_PUBLIC_ORIGIN  # type: ignore[attr-defined]
+            == "https://admin.nodya.shayden.ru"
+        )
+        hosts: str = settings.ADMIN_ALLOWED_HOSTS  # type: ignore[attr-defined]
+        assert "admin.nodya.shayden.ru" in hosts
+        assert "nodya_admin" in hosts
+
+    def test_observability_defaults(self, settings: object) -> None:
+        assert settings.ERROR_EVENTS_ENABLED is True  # type: ignore[attr-defined]
+        assert settings.ERROR_EVENTS_TTL_DAYS == 30  # type: ignore[attr-defined]
+        assert settings.METRICS_ENABLED is True  # type: ignore[attr-defined]
+        assert settings.METRICS_PORT == 8015  # type: ignore[attr-defined]
+
+    def test_unknown_dotenv_key_rejected(self, tmp_path: object) -> None:
+        """extra="forbid" must fail fast on an unknown .env key."""
+        env_file = tmp_path / "local.env"  # type: ignore[operator]
+        env_file.write_text("NODYA_UNKNOWN_KEY=1\n", encoding="utf-8")
+        with pytest.raises(ValidationError):
+            SettingsSchema(_env_file=env_file)
+
+    def test_bounds_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            SettingsSchema(LOG_RETENTION_DAYS=0)
+        with pytest.raises(ValidationError):
+            SettingsSchema(METRICS_PORT=80)
+        with pytest.raises(ValidationError):
+            SettingsSchema(ERROR_EVENTS_TTL_DAYS=0)
+        with pytest.raises(ValidationError):
+            SettingsSchema(ADMIN_SESSION_TTL_MINUTES=1)

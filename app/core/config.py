@@ -11,6 +11,8 @@ class SettingsSchema(BaseSettings):
 
     # Logging
     LOG_LEVEL: str = Field(default="DEBUG")
+    LOG_DIR: str = Field(default="logs")
+    LOG_RETENTION_DAYS: int = Field(default=14, ge=1, le=365)
 
     # HTTP
     APP_PORT: int = Field(default=8014)
@@ -244,6 +246,28 @@ class SettingsSchema(BaseSettings):
     DEBOUNCE_SECONDS: int = Field(default=5)
     SCHEDULED_POLL_SECONDS: int = Field(default=30)
     MAX_SCHEDULED_RETRIES: int = Field(default=5)
+
+    # Admin panel
+    DOCKER_PROXY_URL: str = Field(
+        default="http://docker-proxy:2375",
+        description="Read-only Docker Engine API (socket proxy).",
+    )
+    ADMIN_SESSION_TTL_MINUTES: int = Field(default=720, ge=5, le=10080)
+    ADMIN_COOKIE_SECURE: bool = Field(default=True)
+    ADMIN_COMPOSE_PROJECT: str = Field(default="nodya")
+    ADMIN_LOGS_DIR: str = Field(default="logs")
+    ADMIN_PUBLIC_ORIGIN: str = Field(default="https://admin.nodya.shayden.ru")
+    ADMIN_ALLOWED_HOSTS: str = Field(
+        default="admin.nodya.shayden.ru,localhost,127.0.0.1,testserver,nodya_admin",
+        description="Comma-separated Host header allowlist.",
+    )
+    GRAFANA_PUBLIC_URL: str = Field(default="https://grafana.nodya.shayden.ru")
+
+    # Observability
+    ERROR_EVENTS_ENABLED: bool = Field(default=True)
+    ERROR_EVENTS_TTL_DAYS: int = Field(default=30, ge=1, le=365)
+    METRICS_ENABLED: bool = Field(default=True)
+    METRICS_PORT: int = Field(default=8015, ge=1024, le=65535)
 
     @computed_field
     @property

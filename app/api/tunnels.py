@@ -84,7 +84,7 @@ def stop_tunnel(process: subprocess.Popen | None) -> None:
             process.kill()
             logger.warning("Tunnel force-killed.")
         except Exception as exc:
-            logger.error(f"Failed to terminate tunnel: {exc}")
+            logger.error(f"Failed to terminate tunnel: {exc}", exc_info=True)
 
 
 def _popen(cmd: list[str]) -> subprocess.Popen:

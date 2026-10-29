@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Ошибки · Nodya Admin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Ошибки</h1>
+  <div class="file-list">
+    <a class="chip {{ 'selected' if not level else '' }}" href="/errors">все</a>
+    {% for lvl in levels %}
+      <a class="chip {{ 'selected' if lvl == level else '' }}" href="/errors?level={{ lvl }}">{{ lvl }}</a>
+    {% endfor %}
+  </div>
+</div>
+<section class="panel">
+  <div id="errors-panel" hx-get="/partials/errors?level={{ level|urlencode }}" hx-trigger="every 10s" hx-swap="innerHTML">
+    {% include "partials/errors_table.html" %}
+  </div>
+</section>
+<p class="small muted">
+  Группировка по fingerprint (sha256 от логгера, функции, типа исключения
+  и нормализованного сообщения). TTL записей — 30 дней.
+</p>
+{% endblock %}

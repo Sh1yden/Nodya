@@ -59,6 +59,7 @@ from app.common import (
     declare_topology,
 )
 from app.core import LoggerMixin, settings
+from app.core.metrics import WORKER_BATCHES, WORKER_MESSAGES
 
 _PREFETCH_COUNT = 50
 _THINKING_TTL_SECONDS = 300
@@ -258,6 +259,7 @@ class Worker(LoggerMixin):
             return
 
         key = dto.user_external_id
+        WORKER_MESSAGES.labels(direction="incoming").inc()
         self._lg.debug(
             f"Message received: user={key} channel={dto.channel} "
             f"len={len(dto.text)}"
@@ -307,7 +309,7 @@ class Worker(LoggerMixin):
             try:
                 await self._handle_link(dto, message, match.group(1))
             except Exception as exc:
-                self._lg.error(f"/link handling failed: {exc}")
+                self._lg.error(f"/link handling failed: {exc}", exc_info=True)
                 await self._ack_with_reply(
                     dto, message, "Не смог связать аккаунт — попробуй позже."
                 )
@@ -325,7 +327,7 @@ class Worker(LoggerMixin):
         try:
             await self._handle_feed_command(dto, message, feed_match)
         except Exception as exc:
-            self._lg.error(f"/feed handling failed: {exc}")
+            self._lg.error(f"/feed handling failed: {exc}", exc_info=True)
             await self._ack_with_reply(
                 dto,
                 message,
@@ -444,7 +446,9 @@ class Worker(LoggerMixin):
                 sender_username=dto.sender_username,
             )
         except Exception as exc:
-            self._lg.warning(f"Feed auto-capture resolve failed: {exc}")
+            self._lg.warning(
+                f"Feed auto-capture resolve failed: {exc}", exc_info=True
+            )
             return
         try:
             if user.role != "owner":
@@ -469,7 +473,9 @@ class Worker(LoggerMixin):
                 dto, user, f"Не смогла добавить источник: {exc}"
             )
         except Exception as exc:
-            self._lg.warning(f"Feed auto-capture failed ({raw}): {exc}")
+            self._lg.warning(
+                f"Feed auto-capture failed ({raw}): {exc}", exc_info=True
+            )
 
     async def _publish_text(
         self, dto: IncomingMessage, user: Users, text: str
@@ -647,9 +653,14 @@ class Worker(LoggerMixin):
         try:
             await self._process_batch(batch.dtos, batch.amqp_messages)
         except Exception as exc:
-            self._lg.error(f"Batch failed for user={key}: {exc}")
+            WORKER_BATCHES.labels(result="failed").inc()
+            self._lg.error(
+                f"Batch failed for user={key}: {exc}", exc_info=True
+            )
             for amqp_message in batch.amqp_messages:
                 await amqp_message.nack(requeue=False)
+        else:
+            WORKER_BATCHES.labels(result="success").inc()
 
     async def _process_batch(
         self,
@@ -724,7 +735,9 @@ class Worker(LoggerMixin):
                 )
             )
         except Exception as exc:
-            self._lg.warning(f"Typing {action} failed for {user_id}: {exc}")
+            self._lg.warning(
+                f"Typing {action} failed for {user_id}: {exc}", exc_info=True
+            )
 
     async def _run_locked(
         self, user: Users, dtos: list[IncomingMessage]
@@ -841,7 +854,9 @@ class Worker(LoggerMixin):
         try:
             await self._redis.push_context_many(user_id, context)
         except Exception as exc:
-            self._lg.error(f"Context not saved for {user_id}: {exc}")
+            self._lg.error(
+                f"Context not saved for {user_id}: {exc}", exc_info=True
+            )
 
     async def _handle_dtos(
         self,
@@ -940,6 +955,7 @@ class Worker(LoggerMixin):
         Args:
             outgoing: Message produced for the user.
         """
+        WORKER_MESSAGES.labels(direction="outgoing").inc()
         now = datetime.now(UTC)
         if outgoing.delay_until is not None and outgoing.delay_until > now:
             delay = (outgoing.delay_until - now).total_seconds()
@@ -972,7 +988,7 @@ class Worker(LoggerMixin):
         try:
             descriptions = await self._media_recognizer.describe_many(dtos)
         except Exception as exc:
-            self._lg.error(f"Media enrichment failed: {exc}")
+            self._lg.error(f"Media enrichment failed: {exc}", exc_info=True)
             return [d.text for d in dtos]
         enriched: list[str] = []
         for dto, description in zip(dtos, descriptions, strict=True):
@@ -1012,7 +1028,9 @@ class Worker(LoggerMixin):
                 and f.value.get("text")
             ]
         except Exception as exc:
-            self._lg.error(f"Facts unavailable for {user_id}: {exc}")
+            self._lg.error(
+                f"Facts unavailable for {user_id}: {exc}", exc_info=True
+            )
             fact_lines = []
 
         hit_lines: list[str] = []
@@ -1028,7 +1046,10 @@ class Worker(LoggerMixin):
                 hit_lines = [h for h in hits if h and h not in known]
                 hit_lines = [f"- {line}" for line in hit_lines]
             except Exception as exc:
-                self._lg.error(f"Vector search failed for {user_id}: {exc}")
+                self._lg.error(
+                    f"Vector search failed for {user_id}: {exc}",
+                    exc_info=True,
+                )
 
         if not fact_lines and not hit_lines:
             return ""
@@ -1083,7 +1104,10 @@ class Worker(LoggerMixin):
                 await session.commit()
             self._lg.debug(f"Archived {len(rows)} messages.")
         except Exception as exc:
-            self._lg.error(f"Messages archive failed for {user_id}: {exc}")
+            self._lg.error(
+                f"Messages archive failed for {user_id}: {exc}",
+                exc_info=True,
+            )
 
     async def _resolve_user(
         self,
@@ -1261,7 +1285,9 @@ class Worker(LoggerMixin):
                     envelope = ScheduledEnvelope.model_validate_json(raw)
                     await self._process_scheduled(envelope)
                 except Exception as exc:
-                    self._lg.error(f"Scheduled task failed: {exc}")
+                    self._lg.error(
+                        f"Scheduled task failed: {exc}", exc_info=True
+                    )
 
     async def _process_scheduled(self, envelope: ScheduledEnvelope) -> None:
         """Execute one matured scheduled task.

@@ -45,8 +45,9 @@
 | 2026-10-28 | D6 | Медиа-пайплайн: нормализация TG-медиа (gif/фото/стикеры/видео/video_note), vision-модуль `app/brain/vision` с цепочкой `media`, описания в промпте и Redis-истории, `source_kind` расширен, identity-блок в промптах, тесты медиа |
 | 2026-10-28 | D7 | Этап 7 закрыт: `feed_sources` (миграция `c5868b27f719`), `BackgroundParserJob` (RSS → bp-скоринг → owner/Qdrant, Redis-дедупе), проактивное решение 70/20/10 со сквозной отложенной доставкой через `nodya:scheduled`, `HardFactsRepo.apply_confidence_decay` в ежедневном job, 284 теста |
 | 2026-10-29 | D8 | Этап 7.4: источники новостей (RSS + автопоиск фида, публичные TG-каналы через `t.me/s/`, YouTube как RSS), owner-команды `/feed add/list/rm`, CLI `app.brain.feed_cli`, автоподхват голых ссылок, недельный discovery по интересам через Tavily → Brave → DDG, реакция Ноди в уведомлении; жёсткие лимиты (активные источники, элементы за скан, дневные квоты уведомлений/автоподхвата), 391 тест |
+| 2026-10-29 | D9 | Мониторинг: read-only админ-панель `nodya_admin` (контейнеры, очереди, ошибки, логи, heartbeat; owner-cookie-сессия в Redis, rate limit, CSP), конвейер ошибок `error_events` (fingerprint, redaction, TTL 30 d), метрики Prometheus на `:8015`, heartbeat в Redis, ретеншн JSONL, docker-socket-proxy, стек Prometheus/Loki/Alloy/cAdvisor/Grafana с тремя дашбордами, compose-якоря логирования и `127.0.0.1:8014`; 80 тестов панели |
 
-Следующий шаг: browser-канал (3.6/3.7/6.3) или skills+sandbox (5.5/5.6). Этап 7 закрыт полностью, проактивность и источники работают.
+Следующий шаг: browser-канал (3.6/3.7/6.3) или skills+sandbox (5.5/5.6). Этапы 7 и D9 закрыты: проактивность, источники и мониторинг работают.
 ---
 
 ## **Этап 0: - [x] Фикс того, что уже написано**

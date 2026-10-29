@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}{{ error.exception_type or 'Ошибка' }} · Nodya Admin{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>{{ error.exception_type or 'Ошибка' }}</h1>
+  <a href="/errors" class="muted">← все ошибки</a>
+</div>
+<section class="card">
+  <dl class="kv">
+    <dt>Уровень</dt><dd><span class="chip {{ error.level|level_class }}">{{ error.level }}</span></dd>
+    <dt>Логгер</dt><dd>{{ error.logger }}</dd>
+    <dt>Место</dt><dd>{{ error.module }} · {{ error.function }}</dd>
+    <dt>Повторы</dt><dd>{{ error.count }}</dd>
+    <dt>Первый раз</dt><dd>{{ error.first_seen|dt }} ({{ error.first_seen|ago }})</dd>
+    <dt>Последний раз</dt><dd>{{ error.last_seen|dt }} ({{ error.last_seen|ago }})</dd>
+    <dt>Fingerprint</dt><dd><code class="small">{{ error.fingerprint }}</code></dd>
+  </dl>
+</section>
+<h2>Сообщение</h2>
+<pre class="message">{{ error.message }}</pre>
+{% if error.traceback %}
+<h2>Traceback</h2>
+<pre class="traceback">{{ error.traceback }}</pre>
+{% endif %}
+{% endblock %}
