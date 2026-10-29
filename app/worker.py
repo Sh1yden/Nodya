@@ -15,11 +15,14 @@ processing every SCHEDULED_POLL_SECONDS (ADR-13).
 """
 
 import asyncio
+import random
 import re
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import Literal
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import aio_pika
@@ -35,10 +38,16 @@ from sqlalchemy.exc import IntegrityError
 
 from app.api.messaging import MessagePublisher
 from app.brain import build_interlocutor_block, load_system_prompt
+from app.brain.feed import (
+    AddResult,
+    FeedResolutionError,
+    FeedSourceLimitError,
+    FeedSourceService,
+)
 from app.brain.llm_choice import ChatMessage, LLMRouter
 from app.brain.memory.short import ContextMessage, RedisClient
 from app.brain.memory.vector import VectorMemory
-from app.brain.models import HardFacts, Messages, Users
+from app.brain.models import FeedSources, HardFacts, Messages, Users
 from app.brain.repositories import HardFactsRepo, UsersRepo
 from app.brain.vision import MediaRecognizer
 from app.common import (
@@ -57,6 +66,17 @@ _BATCH_LOCK_TTL_SECONDS = 180
 _LINK_COMMAND_PATTERN = re.compile(
     r"^/(?:link|start)\s+([A-Za-z0-9]{6,12})$", re.IGNORECASE
 )
+_FEED_COMMAND_PATTERN = re.compile(
+    r"^/feed(?:@[A-Za-z0-9_]+)?(?:\s+(add|list|rm)(?:\s+(.+))?)?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_LINK_ONLY_PATTERN = re.compile(
+    r"^[<(\[]?\s*((?:https?://)?[\w.-]+\.[a-z]{2,}(?:/\S*)?)\s*[>)\].!?,;:]*$",
+    re.IGNORECASE,
+)
+_FEED_USAGE = "Использование: /feed add <url> | /feed list | /feed rm <id|url>"
+_FEED_RSS_HINTS = (".xml", ".rss", ".atom", "/feed", "/rss", "/feeds")
+_FEED_LIST_LIMIT = 30
 _HISTORY_LIMIT_FALLBACK = 20
 
 
@@ -68,6 +88,75 @@ def _chat_id(dto: IncomingMessage) -> int | None:
         return int(dto.chat_external_id)
     except ValueError:
         return None
+
+
+def _capture_url(text: str) -> str | None:
+    """Extract a feed-like URL from a bare-link message.
+
+    Args:
+        text: Raw message text.
+
+    Returns:
+        The captured URL, or None when the message is not a bare
+        channel/feed link.
+    """
+    match = _LINK_ONLY_PATTERN.match(text.strip())
+    if match is None:
+        return None
+    raw = match.group(1).rstrip(".,!?;:)]}>")
+    parsed = urlsplit(raw if "://" in raw else f"https://{raw}")
+    host = parsed.netloc.lower().removeprefix("www.")
+    path = parsed.path.lower()
+    if host in ("t.me", "telegram.me"):
+        return raw
+    if host in ("youtube.com", "m.youtube.com"):
+        if path.startswith(("/@", "/channel/", "/c/", "/user/")):
+            return raw
+        return None
+    if any(hint in path for hint in _FEED_RSS_HINTS):
+        return raw
+    if "feed=" in parsed.query.lower() or "rss" in parsed.query.lower():
+        return raw
+    return None
+
+
+def _source_title(source: FeedSources) -> str:
+    """Display title of a source row."""
+    return (source.title or source.url)[:64]
+
+
+def _kind_label(kind: str) -> str:
+    """Human-readable source kind."""
+    return "Telegram" if kind == "telegram" else "RSS"
+
+
+def _add_result_text(result: AddResult) -> str:
+    """Format the outcome of adding a source."""
+    source = result.source
+    if result.status == "exists":
+        return "Этот источник уже отслеживается."
+    if result.status == "reactivated":
+        return f"Источник снова включён: {_source_title(source)}"
+    return (
+        f"Добавила: {_source_title(source)} · "
+        f"{_kind_label(source.kind)}\n{source.url}"
+    )
+
+
+def _format_sources(sources: list[FeedSources]) -> str:
+    """Format the source list for a chat reply."""
+    if not sources:
+        return "Пока нет источников. Добавь: /feed add <url>"
+    lines = [f"Источники ({len(sources)}):"]
+    for index, source in enumerate(sources[:_FEED_LIST_LIMIT], start=1):
+        short_id = source.source_id.hex[:8]
+        suffix = "" if source.is_active else " (выкл.)"
+        lines.append(
+            f"{index}. {short_id} · "
+            f"{_kind_label(source.kind)} · "
+            f"{_source_title(source)}{suffix}"
+        )
+    return "\n".join(lines)
 
 
 @dataclass(slots=True)
@@ -90,6 +179,7 @@ class Worker(LoggerMixin):
         router: LLMRouter,
         vectors: VectorMemory,
         media_recognizer: MediaRecognizer | None = None,
+        feed_service: FeedSourceService | None = None,
     ) -> None:
         """Store collaborators; no I/O happens here.
 
@@ -102,6 +192,8 @@ class Worker(LoggerMixin):
             vectors: Qdrant-backed long-term fact memory.
             media_recognizer: Optional vision describer; None
                 disables media enrichment.
+            feed_service: Optional source management service (tests);
+                a default one is built from the session factory.
         """
         self._url = broker_url
         self._redis = redis_client
@@ -110,6 +202,7 @@ class Worker(LoggerMixin):
         self._router = router
         self._vectors = vectors
         self._media_recognizer = media_recognizer
+        self._feed_service = feed_service or FeedSourceService(session_factory)
         self._connection: AbstractRobustConnection | None = None
         self._channel: AbstractRobustChannel | None = None
         self._queue: AbstractRobustQueue | None = None
@@ -117,6 +210,8 @@ class Worker(LoggerMixin):
         self._poller_task: asyncio.Task | None = None
         self._buffers: dict[str, _PendingBatch] = {}
         self._timers: dict[str, asyncio.Task] = {}
+        self._capture_tasks: set[asyncio.Task] = set()
+        self._captured_refs: set[tuple[str, str]] = set()
 
     async def run(self) -> None:
         """Connect to the broker and start consuming incoming."""
@@ -169,6 +264,7 @@ class Worker(LoggerMixin):
         )
         if await self._try_command(dto, message):
             return
+        self._maybe_capture_source(dto)
         batch = self._buffers.get(key)
         if batch is None:
             batch = _PendingBatch()
@@ -185,7 +281,7 @@ class Worker(LoggerMixin):
         dto: IncomingMessage,
         message: AbstractIncomingMessage,
     ) -> bool:
-        """Intercept pairing commands before the dialogue machinery.
+        """Intercept pairing and feed commands before the dialogue.
 
         Commands bypass debounce/state/LLM/archive completely: they
         are acknowledged immediately after handling so the memory of
@@ -198,27 +294,201 @@ class Worker(LoggerMixin):
         Returns:
             True when the message was a handled command.
         """
-        match = _LINK_COMMAND_PATTERN.match(dto.text.strip())
-        if not match:
+        text = dto.text.strip()
+        match = _LINK_COMMAND_PATTERN.match(text)
+        if match is not None:
+            if not self._is_private_chat(dto):
+                await self._ack_with_reply(
+                    dto,
+                    message,
+                    "Линковка аккаунта доступна только в личном чате.",
+                )
+                return True
+            try:
+                await self._handle_link(dto, message, match.group(1))
+            except Exception as exc:
+                self._lg.error(f"/link handling failed: {exc}")
+                await self._ack_with_reply(
+                    dto, message, "Не смог связать аккаунт — попробуй позже."
+                )
+            return True
+        feed_match = _FEED_COMMAND_PATTERN.match(text)
+        if feed_match is None:
             return False
-        if (
-            dto.chat_external_id is not None
-            and dto.chat_external_id != dto.user_external_id
-        ):
+        if not self._is_private_chat(dto):
             await self._ack_with_reply(
                 dto,
                 message,
-                "Линковка аккаунта доступна только в личном чате.",
+                "Команды /feed доступны только в личном чате.",
             )
             return True
         try:
-            await self._handle_link(dto, message, match.group(1))
+            await self._handle_feed_command(dto, message, feed_match)
         except Exception as exc:
-            self._lg.error(f"/link handling failed: {exc}")
+            self._lg.error(f"/feed handling failed: {exc}")
             await self._ack_with_reply(
-                dto, message, "Не смог связать аккаунт — попробуй позже."
+                dto,
+                message,
+                "Не смогла обработать команду — попробуй позже.",
             )
         return True
+
+    @staticmethod
+    def _is_private_chat(dto: IncomingMessage) -> bool:
+        """Whether the message comes from the user's direct chat."""
+        return (
+            dto.chat_external_id is None
+            or dto.chat_external_id == dto.user_external_id
+        )
+
+    async def _handle_feed_command(
+        self,
+        dto: IncomingMessage,
+        message: AbstractIncomingMessage,
+        match: re.Match[str],
+    ) -> None:
+        """Handle /feed add|list|rm for the owner account.
+
+        Args:
+            dto: The command message.
+            message: Raw AMQP delivery to acknowledge.
+            match: Parsed /feed command parts.
+        """
+        user = await self._resolve_user(
+            dto.channel,
+            dto.user_external_id,
+            sender_name=dto.sender_name,
+            sender_username=dto.sender_username,
+        )
+        if user.role != "owner":
+            await self._ack_with_reply(
+                dto, message, "Эта команда доступна только владельцу."
+            )
+            return
+        action = (match.group(1) or "").lower()
+        argument = (match.group(2) or "").strip()
+        if action == "add":
+            if not argument:
+                await self._ack_with_reply(dto, message, _FEED_USAGE)
+                return
+            try:
+                result = await self._feed_service.add(argument)
+            except (FeedResolutionError, FeedSourceLimitError) as exc:
+                await self._ack_with_reply(
+                    dto, message, f"Не смогла добавить источник: {exc}"
+                )
+                return
+            await self._ack_with_reply(dto, message, _add_result_text(result))
+            return
+        if action == "list":
+            sources = await self._feed_service.list()
+            await self._ack_with_reply(dto, message, _format_sources(sources))
+            return
+        if action == "rm":
+            if not argument:
+                await self._ack_with_reply(dto, message, _FEED_USAGE)
+                return
+            removed = await self._feed_service.deactivate(argument)
+            if removed is None:
+                reply = "Источник не найден."
+            elif removed.changed:
+                reply = f"Источник выключен: {_source_title(removed.source)}."
+            else:
+                reply = (
+                    f"Источник уже выключен: {_source_title(removed.source)}."
+                )
+            await self._ack_with_reply(dto, message, reply)
+            return
+        await self._ack_with_reply(dto, message, _FEED_USAGE)
+
+    def _maybe_capture_source(self, dto: IncomingMessage) -> None:
+        """Schedule auto-capture when the owner sends a bare feed link.
+
+        The message itself is not consumed: it still reaches the
+        dialogue batch. Only channel links and obvious feed URLs are
+        captured, so ordinary links in prose are ignored.
+
+        Args:
+            dto: Incoming message under consideration.
+        """
+        if not settings.FEED_AUTOCAPTURE_ENABLED:
+            return
+        if not self._is_private_chat(dto):
+            return
+        raw = _capture_url(dto.text)
+        if raw is None:
+            return
+        key = f"{dto.channel}:{dto.user_external_id}"
+        ref = (key, raw)
+        if ref in self._captured_refs:
+            return
+        self._captured_refs.add(ref)
+        task = asyncio.create_task(self._capture_source(dto, raw))
+        self._capture_tasks.add(task)
+        task.add_done_callback(self._capture_tasks.discard)
+
+    async def _capture_source(self, dto: IncomingMessage, raw: str) -> None:
+        """Add a source from a bare link in the background.
+
+        Owner-only; never raises into the consumer loop.
+
+        Args:
+            dto: Message that contained the link.
+            raw: Normalized-enough URL captured from the message.
+        """
+        try:
+            user = await self._resolve_user(
+                dto.channel,
+                dto.user_external_id,
+                sender_name=dto.sender_name,
+                sender_username=dto.sender_username,
+            )
+        except Exception as exc:
+            self._lg.warning(f"Feed auto-capture resolve failed: {exc}")
+            return
+        try:
+            if user.role != "owner":
+                return
+            allowed = await self._redis.consume_daily_quota(
+                f"feed_capture:{user.user_id}",
+                settings.FEED_AUTOCAPTURE_DAILY_LIMIT,
+            )
+            if not allowed:
+                await self._publish_text(
+                    dto,
+                    user,
+                    "Дневной лимит авто-добавления исчерпан — "
+                    "используй /feed add <url>.",
+                )
+                return
+            result = await self._feed_service.add(raw)
+            await self._publish_text(dto, user, _add_result_text(result))
+            self._lg.debug(f"Feed auto-captured: {raw}")
+        except (FeedResolutionError, FeedSourceLimitError) as exc:
+            await self._publish_text(
+                dto, user, f"Не смогла добавить источник: {exc}"
+            )
+        except Exception as exc:
+            self._lg.warning(f"Feed auto-capture failed ({raw}): {exc}")
+
+    async def _publish_text(
+        self, dto: IncomingMessage, user: Users, text: str
+    ) -> None:
+        """Send a chat message without acknowledging the delivery.
+
+        Args:
+            dto: Source message (provides channel and chat id).
+            user: Resolved recipient account.
+            text: Human-facing reply text.
+        """
+        await self._publisher.publish_outgoing(
+            OutgoingMessage(
+                user_id=user.user_id,
+                channel=dto.channel,
+                text=text,
+                chat_external_id=dto.chat_external_id,
+            )
+        )
 
     async def _handle_link(
         self,
@@ -368,6 +638,9 @@ class Worker(LoggerMixin):
             await asyncio.sleep(settings.DEBOUNCE_SECONDS)
         batch = self._buffers.pop(key, None)
         self._timers.pop(key, None)
+        self._captured_refs = {
+            ref for ref in self._captured_refs if ref[0] != key
+        }
         if batch is None or not self._running:
             return
         self._lg.debug(f"Debounce finished: batch n={len(batch.dtos)}")
@@ -459,45 +732,89 @@ class Worker(LoggerMixin):
         """Handle a batch under an already-taken lock.
 
         Sets thinking with a TTL (a crashed worker releases the state
-        automatically), asks the proactive decision stub, generates
-        the reply, saves context and returns to idle.
+        automatically), applies the proactive decision, generates the
+        reply, saves context and returns to idle.
 
         Args:
             user: Interlocutor owning the dialogue.
             dtos: Batch messages to answer.
 
         Returns:
-            Published outgoing messages.
+            Published (or scheduled) outgoing messages.
         """
         user_id = user.user_id
-        decision = self._proactive_decision()
-        if decision != "now":
-            # TODO(stage-7): implement delay/skip branches together
-            # with the RSS parser and delayed outgoing.
-            self._lg.debug(f"Proactive decision={decision} for {user_id}")
+        action, delay_seconds = self._proactive_decision()
         await self._redis.set_state(
             user_id, "thinking", ttl=_THINKING_TTL_SECONDS
         )
         self._lg.debug(f"State thinking: user_id={user_id}")
         enriched = await self._enrich_dtos(dtos)
-        outgoing = await self._handle_dtos(user, dtos, enriched_texts=enriched)
+        if action == "skip":
+            # The batch is remembered but left unanswered on purpose
+            # (10% branch of the proactive decision).
+            self._lg.debug(f"Proactive skip: user_id={user_id}")
+            await self._save_dialog_context(user_id, enriched, [])
+            await self._archive_batch(
+                user_id,
+                incoming=dtos,
+                incoming_texts=enriched,
+                outgoing=[],
+            )
+            await self._redis.set_state(user_id, "idle")
+            self._lg.debug(f"State idle: user_id={user_id}")
+            return []
+        delay_until: datetime | None = None
+        if action == "delay" and delay_seconds is not None:
+            delay_until = datetime.now(UTC) + timedelta(seconds=delay_seconds)
+            self._lg.debug(
+                f"Proactive delay: user_id={user_id} by {delay_seconds:.0f}s"
+            )
+        outgoing = await self._handle_dtos(
+            user,
+            dtos,
+            enriched_texts=enriched,
+            delay_until=delay_until,
+        )
         await self._save_dialog_context(user_id, enriched, outgoing)
         await self._redis.set_state(user_id, "idle")
         self._lg.debug(f"State idle: user_id={user_id}")
         return outgoing
 
-    @staticmethod
-    def _proactive_decision() -> str:
-        """Decide how to react to a batch.
+    def _proactive_decision(
+        self,
+    ) -> tuple[Literal["now", "delay", "skip"], float | None]:
+        """Decide how to react to a batch (stage 4.2).
 
-        Stub of TODO_MASTER stage 4: always answers immediately.
-        The 70% now / 20% delay / 10% skip random arrives together
-        with proactivity work (stage 7).
+        70% answer now, 20% generate now but delay delivery by a
+        random 5 min..2 h, 10% skip the answer entirely. All weights
+        and bounds are configurable.
 
         Returns:
-            One of "now" / "delay" / "skip"; currently always "now".
+            Tuple of action and delay seconds (only for "delay").
         """
-        return "now"
+        if not settings.PROACTIVE_ENABLED:
+            return "now", None
+        weights = [
+            max(0, settings.PROACTIVE_NOW_PERCENT),
+            max(0, settings.PROACTIVE_DELAY_PERCENT),
+            max(0, settings.PROACTIVE_SKIP_PERCENT),
+        ]
+        if sum(weights) <= 0:
+            return "now", None
+        action = random.choices(
+            ["now", "delay", "skip"], weights=weights, k=1
+        )[0]
+        if action != "delay":
+            return action, None
+        low = min(
+            settings.PROACTIVE_DELAY_MIN_SECONDS,
+            settings.PROACTIVE_DELAY_MAX_SECONDS,
+        )
+        high = max(
+            settings.PROACTIVE_DELAY_MIN_SECONDS,
+            settings.PROACTIVE_DELAY_MAX_SECONDS,
+        )
+        return "delay", random.uniform(low, high)
 
     async def _save_dialog_context(
         self,
@@ -531,6 +848,7 @@ class Worker(LoggerMixin):
         user: Users,
         dtos: list[IncomingMessage],
         enriched_texts: list[str] | None = None,
+        delay_until: datetime | None = None,
     ) -> list[OutgoingMessage]:
         """Generate one reply for the whole batch (ADR-12 debounce).
 
@@ -543,9 +861,11 @@ class Worker(LoggerMixin):
             dtos: Batch messages to answer.
             enriched_texts: Texts with media markers; None means
                 enrich here (direct calls outside the batch cycle).
+            delay_until: When set, delivery is postponed until this
+                moment via the scheduled ZSet.
 
         Returns:
-            The single published reply wrapped in a list.
+            The single reply wrapped in a list.
         """
         user_id = user.user_id
         limit = settings.LLM_HISTORY_LIMIT or _HISTORY_LIMIT_FALLBACK
@@ -599,8 +919,9 @@ class Worker(LoggerMixin):
             channel=dtos[0].channel,
             text=reply_text,
             chat_external_id=dtos[0].chat_external_id,
+            delay_until=delay_until,
         )
-        await self._publisher.publish_outgoing(outgoing)
+        await self._deliver(outgoing)
         await self._archive_batch(
             user_id,
             incoming=dtos,
@@ -608,6 +929,30 @@ class Worker(LoggerMixin):
             outgoing=[outgoing],
         )
         return [outgoing]
+
+    async def _deliver(self, outgoing: OutgoingMessage) -> None:
+        """Publish now or park the message in the scheduled ZSet.
+
+        ADR-13: messages with a future ``delay_until`` never enter
+        ``outgoing_messages`` early; the poller moves them there once
+        the moment comes.
+
+        Args:
+            outgoing: Message produced for the user.
+        """
+        now = datetime.now(UTC)
+        if outgoing.delay_until is not None and outgoing.delay_until > now:
+            delay = (outgoing.delay_until - now).total_seconds()
+            envelope = ScheduledEnvelope(kind="outgoing", outgoing=outgoing)
+            await self._redis.push_scheduled(
+                envelope.model_dump_json(), time.time() + delay
+            )
+            self._lg.info(
+                f"Outgoing delayed by {delay:.0f}s: "
+                f"user_id={outgoing.user_id}."
+            )
+            return
+        await self._publisher.publish_outgoing(outgoing)
 
     async def _enrich_dtos(self, dtos: list[IncomingMessage]) -> list[str]:
         """Attach media descriptions to each DTO text once per batch.
@@ -926,7 +1271,7 @@ class Worker(LoggerMixin):
         """
         if envelope.kind == "outgoing":
             assert envelope.outgoing is not None
-            await self._publisher.publish_outgoing(envelope.outgoing)
+            await self._deliver(envelope.outgoing)
             return
         assert envelope.incoming is not None
         dtos = envelope.incoming

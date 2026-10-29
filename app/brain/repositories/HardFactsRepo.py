@@ -1,8 +1,11 @@
 """HardFacts data access."""
 
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
+from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -101,3 +104,36 @@ class HardFactsRepo(BaseRepo[HardFacts]):
         )
         result = await self.session.scalars(stmt)
         return list(result.all())
+
+    async def apply_confidence_decay(
+        self,
+        *,
+        after_days: int,
+        factor: float,
+        min_confidence: float,
+    ) -> tuple[int, int]:
+        """Forget stale facts gradually (stage 7.3).
+
+        Facts untouched for ``after_days`` lose confidence by
+        ``factor`` on every scan; facts below ``min_confidence`` are
+        deleted. ``updated_at`` is intentionally not bumped: a fact
+        keeps decaying until consolidation re-extracts it.
+
+        Args:
+            after_days: Age in days before a fact starts decaying.
+            factor: Multiplier applied to stale fact confidence.
+            min_confidence: Deletion threshold.
+
+        Returns:
+            Row counts ``(updated, deleted)``.
+        """
+        cutoff = datetime.now(UTC) - timedelta(days=after_days)
+        update_result = await self.session.execute(
+            sa_update(self.model)
+            .where(self.model.updated_at < cutoff)
+            .values(confidence=self.model.confidence * factor)
+        )
+        delete_result = await self.session.execute(
+            sa_delete(self.model).where(self.model.confidence < min_confidence)
+        )
+        return update_result.rowcount or 0, delete_result.rowcount or 0

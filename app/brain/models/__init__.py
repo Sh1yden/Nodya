@@ -1,8 +1,17 @@
-__all__ = ["AuditLogs", "AuthTokens", "Base", "HardFacts", "Messages", "Users"]
+__all__ = [
+    "AuditLogs",
+    "AuthTokens",
+    "Base",
+    "FeedSources",
+    "HardFacts",
+    "Messages",
+    "Users",
+]
 
 from .AuditLogs import AuditLogs
 from .AuthTokens import AuthTokens
 from .Base import Base
+from .FeedSources import FeedSources
 from .HardFacts import HardFacts
 from .Messages import Messages
 from .Users import Users

@@ -91,6 +91,8 @@ def mock_redis() -> AsyncMock:
     redis.is_agent_online = AsyncMock(return_value=False)
     redis.push_scheduled = AsyncMock()
     redis.pop_due_scheduled = AsyncMock(return_value=[])
+    redis.claim_feed_item = AsyncMock(return_value=True)
+    redis.consume_daily_quota = AsyncMock(return_value=True)
     return redis
 
 

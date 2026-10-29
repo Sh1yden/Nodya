@@ -64,6 +64,6 @@ class TestSettingsSchema:
         )
         assert (
             settings.MEDIA_DESCRIPTION_MAX_CHARS  # type: ignore[attr-defined]
-            == 400
+            == 600
         )
         assert settings.MEDIA_MAX_PER_BATCH == 10  # type: ignore[attr-defined]

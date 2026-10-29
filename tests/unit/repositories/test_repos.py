@@ -7,10 +7,16 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
-from app.brain.models import AuditLogs, HardFacts, Users
+from app.brain.models import (
+    AuditLogs,
+    FeedSources,
+    HardFacts,
+    Users,
+)
 from app.brain.repositories import (
     AuditLogsRepo,
     BaseRepo,
+    FeedSourcesRepo,
     HardFactsRepo,
     UsersRepo,
 )
@@ -126,6 +132,50 @@ class TestHardFactsRepo:
         repo = HardFactsRepo(session)
         facts = await repo.search_last_updated(uuid.uuid4(), limit=5)
         assert facts == ["f1"]
+
+    async def test_apply_confidence_decay(self) -> None:
+        session = AsyncMock()
+        update_result = MagicMock()
+        update_result.rowcount = 3
+        delete_result = MagicMock()
+        delete_result.rowcount = 1
+        session.execute = AsyncMock(side_effect=[update_result, delete_result])
+
+        repo = HardFactsRepo(session)
+        updated, deleted = await repo.apply_confidence_decay(
+            after_days=7, factor=0.95, min_confidence=0.1
+        )
+
+        assert (updated, deleted) == (3, 1)
+        assert session.execute.await_count == 2
+
+
+class TestFeedSourcesRepo:
+    def test_init_sets_model(self) -> None:
+        session = AsyncMock()
+        repo = FeedSourcesRepo(session)
+        assert repo.model is FeedSources
+
+    async def test_list_active_returns_rows(self) -> None:
+        session = AsyncMock()
+        mock_scalars_result = MagicMock()
+        mock_scalars_result.all.return_value = ["feed1"]
+        session.scalars = AsyncMock(return_value=mock_scalars_result)
+
+        repo = FeedSourcesRepo(session)
+        sources = await repo.list_active()
+
+        assert sources == ["feed1"]
+        session.scalars.assert_awaited_once()
+
+    async def test_touch_executes_update(self) -> None:
+        session = AsyncMock()
+        session.execute = AsyncMock()
+
+        repo = FeedSourcesRepo(session)
+        await repo.touch(uuid.uuid4())
+
+        session.execute.assert_awaited_once()
 
 
 class TestAuditLogsRepo:

@@ -61,8 +61,60 @@ class SettingsSchema(BaseSettings):
 
     # Media recognition (vision)
     MEDIA_IMAGE_MAX_BYTES: int = Field(default=5 * 1024 * 1024)
-    MEDIA_DESCRIPTION_MAX_CHARS: int = Field(default=400)
+    MEDIA_DESCRIPTION_MAX_CHARS: int = Field(
+        default=600,
+        description=(
+            "Safety cap for a media description; the vision prompt "
+            "targets 200-450 characters."
+        ),
+    )
     MEDIA_MAX_PER_BATCH: int = Field(default=10)
+
+    # Proactive dialogue (stages 4.2/7)
+    PROACTIVE_ENABLED: bool = Field(
+        default=True,
+        description="Apply the now/delay/skip decision to replies.",
+    )
+    PROACTIVE_NOW_PERCENT: int = Field(default=70)
+    PROACTIVE_DELAY_PERCENT: int = Field(default=20)
+    PROACTIVE_SKIP_PERCENT: int = Field(default=10)
+    PROACTIVE_DELAY_MIN_SECONDS: int = Field(default=300)
+    PROACTIVE_DELAY_MAX_SECONDS: int = Field(default=7200)
+
+    # Feed parser (stage 7.1)
+    FEED_SCAN_MINUTES: int = Field(default=60)
+    FEED_MAX_ITEMS_PER_SOURCE: int = Field(default=5)
+    FEED_NOTIFY_SCORE: float = Field(default=8.0)
+    FEED_STORE_SCORE: float = Field(default=5.0)
+    FEED_SEEN_TTL_DAYS: int = Field(default=7)
+    FEED_REQUEST_TIMEOUT: int = Field(default=15)
+
+    # Feed sources management (stage 7.4)
+    FEED_MAX_ACTIVE_SOURCES: int = Field(default=20)
+    FEED_MAX_ITEMS_PER_RUN: int = Field(default=15)
+    FEED_NOTIFY_DAILY_LIMIT: int = Field(default=10)
+    FEED_AUTOCAPTURE_ENABLED: bool = Field(default=True)
+    FEED_AUTOCAPTURE_DAILY_LIMIT: int = Field(default=3)
+    FEED_REACTION_ENABLED: bool = Field(default=True)
+
+    # Feed discovery (stage 7.4)
+    FEED_DISCOVERY_ENABLED: bool = Field(default=True)
+    FEED_DISCOVERY_INTERVAL_HOURS: int = Field(default=168)
+    FEED_DISCOVERY_QUERIES: int = Field(default=3)
+    FEED_DISCOVERY_MAX_RESULTS: int = Field(default=5)
+    FEED_DISCOVERY_MAX_CANDIDATES: int = Field(default=12)
+    FEED_DISCOVERY_MAX_SOURCES: int = Field(default=2)
+    FEED_DISCOVERY_MIN_SCORE: float = Field(default=8.0)
+
+    # Web search for discovery (stage 7.4)
+    SEARCH_TAVILY_API_KEY: str = Field(default="")
+    SEARCH_BRAVE_API_KEY: str = Field(default="")
+    SEARCH_REQUEST_TIMEOUT: int = Field(default=10)
+
+    # Confidence decay (stage 7.3)
+    CONFIDENCE_DECAY_AFTER_DAYS: int = Field(default=7)
+    CONFIDENCE_DECAY_FACTOR: float = Field(default=0.95)
+    CONFIDENCE_DECAY_MIN_CONFIDENCE: float = Field(default=0.1)
 
     # AI APIs
     GEMINI_API_KEY: str = Field(default="")

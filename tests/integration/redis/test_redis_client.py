@@ -122,6 +122,21 @@ class TestRedisClient:
         assert len(code) == 8
 
     @patch("app.brain.memory.short.redis.Redis.from_url")
+    async def test_claim_feed_item_first_wins(
+        self, mock_from_url: Mock
+    ) -> None:
+        mock_redis = AsyncMock()
+        mock_redis.set = AsyncMock(side_effect=[True, False])
+        mock_redis.register_script = Mock(return_value=AsyncMock())
+        mock_from_url.return_value = mock_redis
+
+        client = RedisClient("redis://localhost:6379")
+
+        assert await client.claim_feed_item("digest", 60) is True
+        assert await client.claim_feed_item("digest", 60) is False
+        assert mock_redis.set.await_args.kwargs == {"nx": True, "ex": 60}
+
+    @patch("app.brain.memory.short.redis.Redis.from_url")
     async def test_push_and_pop_debounce(self, mock_from_url: Mock) -> None:
         mock_redis = AsyncMock()
 
@@ -153,3 +168,45 @@ class TestRedisClient:
 
         batch = await client.pop_debounce_batch(uid)
         assert batch == ["msg1"]
+
+    @patch("app.brain.memory.short.redis.Redis.from_url")
+    async def test_consume_daily_quota_allows_first_calls(
+        self, mock_from_url: Mock
+    ) -> None:
+        mock_redis = AsyncMock()
+        counts = [[1, True], [2, True], [3, True]]
+        pipe = MagicMock()
+        pipe.incr = MagicMock()
+        pipe.expire = MagicMock()
+        pipe.execute = AsyncMock(side_effect=counts)
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=pipe)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_redis.pipeline = Mock(return_value=ctx)
+        mock_redis.register_script = Mock(return_value=AsyncMock())
+        mock_from_url.return_value = mock_redis
+
+        client = RedisClient("redis://localhost:6379")
+
+        assert await client.consume_daily_quota("feed_notify:x", 2) is True
+        assert await client.consume_daily_quota("feed_notify:x", 2) is True
+        assert await client.consume_daily_quota("feed_notify:x", 2) is False
+
+        day = datetime.now(UTC).date().isoformat()
+        key = pipe.incr.call_args.args[0]
+        assert key == f"nodya:quota:feed_notify:x:{day}"
+        assert pipe.expire.call_args.args[1] == 86400
+
+    @patch("app.brain.memory.short.redis.Redis.from_url")
+    async def test_consume_daily_quota_zero_limit_forbids(
+        self, mock_from_url: Mock
+    ) -> None:
+        mock_redis = AsyncMock()
+        mock_redis.pipeline = Mock()
+        mock_redis.register_script = Mock(return_value=AsyncMock())
+        mock_from_url.return_value = mock_redis
+
+        client = RedisClient("redis://localhost:6379")
+
+        assert await client.consume_daily_quota("bucket", 0) is False
+        mock_redis.pipeline.assert_not_called()

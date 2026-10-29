@@ -81,7 +81,10 @@ nodya/
 │   │   ├── repositories/         # Data access layer
 │   │   ├── memory/               # short (Redis), long (PG), init/prompts, vector (Qdrant)
 │   │   ├── llm_choice/           # LLM providers + router
+│   │   ├── feed/                 # Источники: резолв, RSS/Telegram, reaction, discovery
+│   │   ├── search/               # Веб-поиск: Tavily → Brave → DuckDuckGo
 │   │   ├── skills/               # Skill registry + sandbox
+│   │   ├── feed_cli.py           # CLI управления источниками
 │   │   └── migrations/           # Alembic
 │   │
 │   ├── common/                   # Общие DTO + топология брокера
@@ -627,6 +630,32 @@ class SkillRegistry:
 | `sandboxed` | Если `deployment.sandbox_enabled` | Docker контейнер (--network none, read-only) | Запуск кода "в песочнице" |
 | `system` | `user.role == owner` + `deployment.system_skills_enabled` | Nodya Agent (отдельный процесс) | Shell, файлы, процессы |
 
+### 5.7 Источники новостей (`app/brain/feed/`, `app/brain/search/`)
+
+- `resolver.resolve_source(raw)` — единая точка входа: публичный Telegram
+  (`t.me/<name>` → `https://t.me/s/<name>`), YouTube-канал (`/channel/UC…`,
+  `/@handle`, `/c/`, `/user/` → `feeds/videos.xml?channel_id=…`, kind `rss`),
+  сайт — сам фид либо автопоиск `<link rel="alternate" type="application/rss+xml|atom+xml">`
+- `fetchers.fetch_source(kind, url)` — RSS/Atom через `feedparser` и скрапинг
+  публичных TG-каналов; при любой ошибке возвращает `None`, поэтому
+  `last_checked_at` не обновляется и источник не «стареет»
+- `service.FeedSourceService` — add/reactivate/list/deactivate, потолок
+  `FEED_MAX_ACTIVE_SOURCES`; выключенные источники не удаляются и не
+  добавляются повторно
+- `reaction.generate_reaction` — 1–2 предложения от лица Ноди (роль
+  `dialogue`); ошибка реакции не отменяет уведомление
+- `discovery.FeedDiscoveryJob` — раз в `FEED_DISCOVERY_INTERVAL_HOURS`:
+  факты owner → до `FEED_DISCOVERY_QUERIES` запросов → `SearchChain`
+  (Tavily → Brave → DuckDuckGo, провайдер без ключа пропускается) →
+  ≤`FEED_DISCOVERY_MAX_CANDIDATES` кандидатов (по одному на хост) →
+  bp-ранжирование → score ≥ `FEED_DISCOVERY_MIN_SCORE`, не более
+  `FEED_DISCOVERY_MAX_SOURCES` добавлений и одно уведомление
+- Управление: owner-команды `/feed add|list|rm` в личном чате, CLI
+  `python -m app.brain.feed_cli`, автоподхват голых ссылок owner
+  (квота `FEED_AUTOCAPTURE_DAILY_LIMIT`)
+- Квоты уведомлений — `consume_daily_quota` (Redis `INCR`+`EXPIRE 86400`,
+  ключ по UTC-дате); при исчерпании новость попадает только в Qdrant
+
 ---
 
 ## 6. Модели данных (целевые после фиксов)
@@ -699,13 +728,18 @@ class SkillRegistry:
 
 | Колонка | Тип | Ограничения | Назначение |
 |---|---|---|---|
-| `source_id` | `Integer` | PK, autoincrement | ID источника |
-| `url` | `String` | NOT NULL, unique | RSS/TG URL |
-| `kind` | `String` | Literal["rss", "telegram"] | Тип источника |
-| `title` | `String` | nullable | Человекочитаемое имя |
-| `is_active` | `Boolean` | default=True | Выключение без удаления |
-| `last_checked_at` | `DateTime(tz)` | nullable | Последний обход |
+| `source_id` | `Uuid` | PK, default uuid4 | ID источника |
+| `url` | `String(1024)` | NOT NULL, unique | Канонический URL фида (YouTube хранится как `rss`) |
+| `kind` | `String(16)` | NOT NULL, `CHECK kind IN ('rss','telegram')` (`ck_feed_sources_kind_valid`) | Тип источника |
+| `title` | `String(256)` | nullable | Человекочитаемое имя |
+| `is_active` | `Boolean` | default=True, server_default=true | Мягкое выключение без удаления |
+| `last_checked_at` | `DateTime(tz)` | nullable | Последний успешный обход |
 | `created_at` | `DateTime(tz)` | server_default=now() | Когда добавлен |
+
+Источники добавляются owner-командами `/feed add`, CLI `app.brain.feed_cli`
+или автоматически (автоподхват ссылок и недельный `FeedDiscoveryJob`).
+Выключенные строки сохраняются: повторное добавление URL реактивирует запись,
+а discovery пропускает все известные URL. См. §5.7.
 
 ---
 
@@ -890,6 +924,32 @@ class SettingsSchema(BaseSettings):
     DEBOUNCE_SECONDS: int = 5
     SCHEDULED_POLL_SECONDS: int = 30
     MAX_SCHEDULED_RETRIES: int = 5
+
+    # --- Feed / sources (7.4) ---
+    FEED_SCAN_MINUTES: int = 60
+    FEED_MAX_ITEMS_PER_SOURCE: int = 5
+    FEED_MAX_ITEMS_PER_RUN: int = 15
+    FEED_NOTIFY_SCORE: float = 8.0
+    FEED_STORE_SCORE: float = 5.0
+    FEED_SEEN_TTL_DAYS: int = 7
+    FEED_REQUEST_TIMEOUT: int = 15
+    FEED_MAX_ACTIVE_SOURCES: int = 20
+    FEED_NOTIFY_DAILY_LIMIT: int = 10
+    FEED_AUTOCAPTURE_ENABLED: bool = True
+    FEED_AUTOCAPTURE_DAILY_LIMIT: int = 3
+    FEED_REACTION_ENABLED: bool = True
+    FEED_DISCOVERY_ENABLED: bool = True
+    FEED_DISCOVERY_INTERVAL_HOURS: int = 168
+    FEED_DISCOVERY_QUERIES: int = 3
+    FEED_DISCOVERY_MAX_RESULTS: int = 5
+    FEED_DISCOVERY_MAX_CANDIDATES: int = 12
+    FEED_DISCOVERY_MAX_SOURCES: int = 2
+    FEED_DISCOVERY_MIN_SCORE: float = 8.0
+
+    # --- Web search (Tavily -> Brave -> DuckDuckGo) ---
+    SEARCH_TAVILY_API_KEY: str = ""  # пусто -> провайдер пропускается
+    SEARCH_BRAVE_API_KEY: str = ""
+    SEARCH_REQUEST_TIMEOUT: int = 10
 
     # --- Skills ---
     SYSTEM_SKILLS_ENABLED: bool = False

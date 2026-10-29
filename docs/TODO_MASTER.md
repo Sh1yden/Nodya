@@ -42,8 +42,11 @@
 | 2026-08-27 | D5 | Тесты готовы. |
 | 2026-08-30 | R3 | Рефакторинг LLM-провайдеров: добавлен ProviderRegistry (ленивая инициализация, конфиг-цепочки), заменён прямой Gemini на GeminiCloudflareProvider (httpx → Cloudflare Worker https://geminifix.shayden.workers.dev/), старый GeminiProvider отключён через GEMINI_ENABLED=false. Роутер теперь строит цепочки из настроек LLM_PROVIDER_CHAINS. Обновлены тесты и доки. |
 | 2026-09-01 | R4 | Безопасность и харднинг: `verify_password` ловит `Argon2Error` (фикс 500 для tg-юзеров) + dummy-hash против тайминга, `has_usable_password` (миграция 03a6ff552596) и `POST /auth/logout` (`revoked_at`), bootstrap-CLI `app.brain.bootstrap` с `pg_advisory_xact_lock` и `one_owner` partial index (ADR-16, замена OWNER_USERNAME гонки), `ProviderRegistry.close_all` async + `_chain` lazy resolve, `TGSender` ловит `TelegramAPIError` без зависания, `Messages.source_kind` (ADR-17 media фундамент), `GEMINI_CLOUDFLARE_URL` без дефолта на личный воркер + `extra=forbid`, `Dockerfile USER app` + `healthcheck`, `docker-compose` порты на `127.0.0.1`, `Base` naming_convention фикс `abbdbc96f127 downgrade`, 3-уровневые LLM цепочки (`haiku`, `llama`, `qwen`) + `media` роль, `TypingEvent` + `app/chats/typing.py` канал-агностик статус «печатает» через `typing_events` очередь (не в Worker) |
+| 2026-10-28 | D6 | Медиа-пайплайн: нормализация TG-медиа (gif/фото/стикеры/видео/video_note), vision-модуль `app/brain/vision` с цепочкой `media`, описания в промпте и Redis-истории, `source_kind` расширен, identity-блок в промптах, тесты медиа |
+| 2026-10-28 | D7 | Этап 7 закрыт: `feed_sources` (миграция `c5868b27f719`), `BackgroundParserJob` (RSS → bp-скоринг → owner/Qdrant, Redis-дедупе), проактивное решение 70/20/10 со сквозной отложенной доставкой через `nodya:scheduled`, `HardFactsRepo.apply_confidence_decay` в ежедневном job, 284 теста |
+| 2026-10-29 | D8 | Этап 7.4: источники новостей (RSS + автопоиск фида, публичные TG-каналы через `t.me/s/`, YouTube как RSS), owner-команды `/feed add/list/rm`, CLI `app.brain.feed_cli`, автоподхват голых ссылок, недельный discovery по интересам через Tavily → Brave → DDG, реакция Ноди в уведомлении; жёсткие лимиты (активные источники, элементы за скан, дневные квоты уведомлений/автоподхвата), 391 тест |
 
-Следующий шаг: D4-проактивность (70/20/10, RSS+feed_sources) или browser-канал; медиа пайплайн `media` роль.
+Следующий шаг: browser-канал (3.6/3.7/6.3) или skills+sandbox (5.5/5.6). Этап 7 закрыт полностью, проактивность и источники работают.
 ---
 
 ## **Этап 0: - [x] Фикс того, что уже написано**
@@ -691,7 +694,7 @@ class ChannelSender(ABC):
 - `WebSocketManager.send_to_user(message.user_id, message.text)`
 - Если сокет закрыт — логировать как недоставленное, не падать
 
-### 6.4 Отложенные сообщения (delayed) — РЕШЕНО (поправка 2)
+### 6.4 - [x] Отложенные сообщения (delayed) — РЕШЕНО (поправка 2)
 - `OutgoingMessage` содержит поле `delay_until: datetime | None`
 - Механизм — **Redis ZSet + APScheduler**:
   - Сообщение с будущим временем не публикуется в
@@ -711,7 +714,7 @@ class ChannelSender(ABC):
 
 ## **Этап 7: Фоновые задачи (проактивное поведение)**
 
-### 7.0 Модель `FeedSources` — источники парсера (поправка 7)
+### 7.0 - [x] Модель `FeedSources` — источники парсера (поправка 7)
 - Таблица `feed_sources`: `source_id` PK, `url` String unique,
   `kind` Literal["rss", "telegram"], `title` String nullable,
   `is_active` Boolean default True,
@@ -719,7 +722,7 @@ class ChannelSender(ABC):
 - Управление источниками позже — через skills tier `system`
 - Миграция Alembic после создания модели
 
-### 7.1 `app/brain/skills/background.py` — `BackgroundParserJob`
+### 7.1 - [x] `app/brain/skills/background.py` — `BackgroundParserJob`
 ```python
 class BackgroundParserJob:
     """APScheduler job. Парсинг RSS/TG-каналов."""
@@ -731,7 +734,7 @@ class BackgroundParserJob:
         """Через LLMRouter (background_parser роль)."""
 ```
 
-### 7.2 `app/brain/skills/consolidation.py` — `ConsolidationJob`
+### 7.2 - [x] `app/brain/memory/consolidation.py` — `ConsolidationJob`
 ```python
 class ConsolidationJob:
     """Фаза сна. Извлечение фактов из контекста диалога."""
@@ -743,7 +746,7 @@ class ConsolidationJob:
         """Через LLMRouter (compact_session роль). Парсинг JSON из ответа."""
 ```
 
-### 7.3 `HardFactsRepo.apply_confidence_decay`
+### 7.3 - [x] `HardFactsRepo.apply_confidence_decay`
 ```python
 async def apply_confidence_decay(self) -> None:
     """
@@ -751,6 +754,28 @@ async def apply_confidence_decay(self) -> None:
     DELETE FROM hard_facts WHERE confidence < 0.1;
     """
 ```
+
+### 7.4 - [x] Источники новостей: RSS, Telegram, YouTube, авто-поиск
+
+- **Пакет `app/brain/feed/`:** `resolver` (нормализация URL, `t.me/s/<channel>`,
+  YouTube `/channel`|`/@handle` → RSS, автопоиск `<link rel="alternate">`),
+  `fetchers` (RSS/Atom, скрапинг публичных TG-каналов), `service`
+  (`FeedSourceService`: add/reactivate/list/deactivate, потолок активных),
+  `reaction` (короткая реакция Ноди), `discovery` (недельный поиск источников),
+  `profile` (факты owner как профиль интересов), `text`/`prompts`/`models`
+- **Пакет `app/brain/search/`:** `SearchChain` Tavily → Brave → DuckDuckGo с
+  фолбэком при ошибке/пустом ответе; провайдеры без ключа пропускаются
+- **Worker:** команды `/feed add|list|rm` (owner, личный чат), автоподхват
+  голых ссылок на каналы/фиды от owner с дневной квотой; `/link` без изменений
+- **CLI:** `python -m app.brain.feed_cli add|list|rm|discover`
+- **Лимиты:** `FEED_MAX_ACTIVE_SOURCES`, `FEED_MAX_ITEMS_PER_RUN`,
+  дневные квоты `FEED_NOTIFY_DAILY_LIMIT` и `FEED_AUTOCAPTURE_DAILY_LIMIT`
+  (Redis INCR+EXPIRE по UTC-дате), недельный discovery с потолком
+  `FEED_DISCOVERY_MAX_SOURCES` и порогом `FEED_DISCOVERY_MIN_SCORE`
+- **Уведомление:** заголовок + summary + ссылка + 1–2 предложения реакции;
+  при исчерпанной квоте новость пишется в Qdrant без сообщения
+- **Тесты:** resolver/fetchers/service/reaction/discovery, search-цепочка,
+  Worker-команды и автоподхват, Redis-квоты, бюджет скана
 
 ---
 

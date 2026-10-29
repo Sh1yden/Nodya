@@ -10,6 +10,7 @@ from app.brain.models import (
     AuditLogs,
     AuthTokens,
     Base,
+    FeedSources,
     HardFacts,
     Messages,
     Users,
@@ -117,6 +118,27 @@ class TestHardFactsModel:
         table = HardFacts.__table__
         constraint_names = {c.name for c in table.constraints if c.name}
         assert "uq_hard_facts_identity" in constraint_names
+
+
+class TestFeedSourcesModel:
+    def test_table_name(self) -> None:
+        assert FeedSources.__tablename__ == "feed_sources"
+
+    def test_has_required_columns(self) -> None:
+        mapper = sa_inspect(FeedSources)
+        cols = {c.key for c in mapper.columns}
+        assert "source_id" in cols
+        assert "url" in cols
+        assert "kind" in cols
+        assert "title" in cols
+        assert "is_active" in cols
+        assert "last_checked_at" in cols
+        assert "created_at" in cols
+
+    def test_kind_check_constraint_exists(self) -> None:
+        table = FeedSources.__table__
+        constraint_names = {c.name for c in table.constraints if c.name}
+        assert "ck_feed_sources_kind_valid" in constraint_names
 
 
 class TestAuditLogsModel:

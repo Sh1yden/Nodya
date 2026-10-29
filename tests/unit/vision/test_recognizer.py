@@ -62,7 +62,9 @@ class TestDescribe:
 
         marker = await recognizer.describe(_dto(media=_photo()))
 
-        assert marker == "[photo: Hello from LLM; 800x600]"
+        assert marker == (
+            "[Вложение: фото | Распознано: Hello from LLM | Детали: 800x600]"
+        )
         fetch.assert_awaited_once_with("photo-1")
         role = mock_llm_router.generate_with_fallback.await_args.args[0]
         assert role == "media"
@@ -87,7 +89,10 @@ class TestDescribe:
 
         marker = await recognizer.describe(_dto(media=media))
 
-        assert marker == "[gif: Hello from LLM; 3s, 480x270]"
+        assert marker == (
+            "[Вложение: гифка | Распознано: Hello from LLM"
+            " | Детали: кадр превью, длительность 3с, 480x270]"
+        )
         fetch.assert_awaited_once_with("gif-thumb")
 
     async def test_static_sticker_uses_own_file(self, mock_llm_router) -> None:
@@ -104,9 +109,12 @@ class TestDescribe:
         marker = await recognizer.describe(_dto(media=media))
 
         assert marker is not None
-        assert marker.startswith("[sticker: Hello from LLM; static")
-        assert "emoji 😂" in marker
-        assert "set cats" in marker
+        assert marker.startswith(
+            "[Вложение: стикер | Распознано: Hello from LLM"
+        )
+        assert "статичный" in marker
+        assert "эмодзи 😂" in marker
+        assert "набор cats" in marker
         fetch.assert_awaited_once_with("sticker-main")
 
     async def test_animated_sticker_uses_thumbnail(
@@ -121,8 +129,10 @@ class TestDescribe:
             sticker_format="animated",
         )
 
-        await recognizer.describe(_dto(media=media))
+        marker = await recognizer.describe(_dto(media=media))
 
+        assert marker is not None
+        assert "кадр превью" in marker
         fetch.assert_awaited_once_with("sticker-thumb")
 
     async def test_voice_is_metadata_only(self, mock_llm_router) -> None:
@@ -134,7 +144,9 @@ class TestDescribe:
 
         marker = await recognizer.describe(_dto(media=media))
 
-        assert marker == "[voice: 7s]"
+        assert marker == (
+            "[Вложение: голосовое сообщение | Детали: длительность 7с]"
+        )
         fetch.assert_not_awaited()
         mock_llm_router.generate_with_fallback.assert_not_awaited()
 
@@ -147,7 +159,7 @@ class TestDescribe:
 
         marker = await recognizer.describe(_dto(media=media))
 
-        assert marker == "[audio: 3:45]"
+        assert marker == "[Вложение: аудио | Детали: длительность 3:45]"
 
     async def test_oversize_primary_falls_back_to_thumbnail(
         self, mock_llm_router
@@ -202,7 +214,11 @@ class TestDescribe:
 
         marker = await recognizer.describe(_dto(media=media))
 
-        assert marker == "[video: превью недоступно; 12s, 1280x720]"
+        assert marker == (
+            "[Вложение: видео | Статус: превью недоступно"
+            " | Детали: длительность 12с, 1280x720]"
+        )
+        assert "кадр превью" not in marker
         fetch.assert_not_awaited()
 
     async def test_unavailable_preview_is_reported(
@@ -213,7 +229,9 @@ class TestDescribe:
 
         marker = await recognizer.describe(_dto(media=_photo()))
 
-        assert marker == "[photo: превью недоступно; 800x600]"
+        assert marker == (
+            "[Вложение: фото | Статус: превью недоступно | Детали: 800x600]"
+        )
         mock_llm_router.generate_with_fallback.assert_not_awaited()
 
     async def test_llm_failure_degrades_to_marker(
@@ -227,7 +245,10 @@ class TestDescribe:
 
         marker = await recognizer.describe(_dto(media=_photo()))
 
-        assert marker == "[photo: не удалось распознать; 800x600]"
+        assert marker == (
+            "[Вложение: фото | Статус: не удалось распознать"
+            " | Детали: 800x600]"
+        )
 
     async def test_description_is_cleaned_and_truncated(
         self, mock_llm_router
@@ -240,7 +261,40 @@ class TestDescribe:
 
         marker = await recognizer.describe(_dto(media=_photo()))
 
-        assert marker == "[photo: кот (спит); 800x600]"
+        assert marker == (
+            "[Вложение: фото | Распознано: кот… | Детали: 800x600]"
+        )
+
+    async def test_truncation_prefers_complete_sentences(
+        self, mock_llm_router
+    ) -> None:
+        fetch = AsyncMock(return_value=(b"img", "image/jpeg"))
+        mock_llm_router.generate_with_fallback.return_value = LLMResponse(
+            text="Кот спит на диване. За окном дождь."
+        )
+        recognizer = _recognizer(mock_llm_router, fetch, max_chars=25)
+
+        marker = await recognizer.describe(_dto(media=_photo()))
+
+        assert marker == (
+            "[Вложение: фото | Распознано: Кот спит на диване. …"
+            " | Детали: 800x600]"
+        )
+
+    async def test_decimal_dot_is_not_a_sentence_end(
+        self, mock_llm_router
+    ) -> None:
+        fetch = AsyncMock(return_value=(b"img", "image/jpeg"))
+        mock_llm_router.generate_with_fallback.return_value = LLMResponse(
+            text="Цена 3.5 тысячи рублей очень дорого"
+        )
+        recognizer = _recognizer(mock_llm_router, fetch, max_chars=12)
+
+        marker = await recognizer.describe(_dto(media=_photo()))
+
+        assert marker == (
+            "[Вложение: фото | Распознано: Цена 3.5… | Детали: 800x600]"
+        )
 
     async def test_legacy_dto_is_supported(self, mock_llm_router) -> None:
         fetch = AsyncMock(return_value=(b"img", "image/jpeg"))
@@ -249,7 +303,7 @@ class TestDescribe:
 
         marker = await recognizer.describe(dto)
 
-        assert marker == "[photo: Hello from LLM]"
+        assert marker == "[Вложение: фото | Распознано: Hello from LLM]"
         fetch.assert_awaited_once_with("legacy-file")
 
     async def test_no_media_returns_none(self, mock_llm_router) -> None:
@@ -272,7 +326,9 @@ class TestDescribeMany:
         )
 
         assert results[0] is None
-        assert results[1] == "[photo: Hello from LLM; 800x600]"
+        assert results[1] == (
+            "[Вложение: фото | Распознано: Hello from LLM | Детали: 800x600]"
+        )
 
     async def test_batch_limit_skips_extra_media(
         self, mock_llm_router
@@ -284,7 +340,71 @@ class TestDescribeMany:
             [_dto(media=_photo("a")), _dto(media=_photo("b"))]
         )
 
-        assert results[0] == "[photo: Hello from LLM; 800x600]"
-        assert results[1] is not None
-        assert "пропущено" in results[1]
+        assert results[0] == (
+            "[Вложение: фото | Распознано: Hello from LLM | Детали: 800x600]"
+        )
+        assert results[1] == (
+            "[Вложение: фото | Статус: пропущено из-за лимита"
+            " медиа в батче | Детали: 800x600]"
+        )
         fetch.assert_awaited_once_with("a")
+
+
+class TestVisionPrompt:
+    """The prompt must ask for rich, evidence-based descriptions."""
+
+    async def test_prompt_requests_detail_and_forbids_preamble(
+        self, mock_llm_router
+    ) -> None:
+        fetch = AsyncMock(return_value=(b"img", "image/jpeg"))
+        recognizer = _recognizer(mock_llm_router, fetch)
+
+        await recognizer.describe(_dto(media=_photo()))
+
+        chat = mock_llm_router.generate_with_fallback.await_args.args[1]
+        prompt = chat[0].content[1].text
+        assert "200–450 знаков" in prompt
+        assert "перепиши дословно" in prompt
+        assert "не додумывай" in prompt
+
+    async def test_preview_kind_mentions_frame(self, mock_llm_router) -> None:
+        fetch = AsyncMock(return_value=(b"gif", "image/jpeg"))
+        recognizer = _recognizer(mock_llm_router, fetch)
+        media = MediaDescriptor(
+            kind="animation",
+            file_id="gif",
+            thumbnail_file_id="thumb",
+        )
+
+        await recognizer.describe(_dto(media=media))
+
+        chat = mock_llm_router.generate_with_fallback.await_args.args[1]
+        prompt = chat[0].content[1].text
+        assert "кадр-превью" in prompt
+
+    async def test_caption_is_passed_as_context(self, mock_llm_router) -> None:
+        fetch = AsyncMock(return_value=(b"img", "image/jpeg"))
+        recognizer = _recognizer(mock_llm_router, fetch)
+
+        await recognizer.describe(
+            _dto(text="что тут написано?", media=_photo())
+        )
+
+        chat = mock_llm_router.generate_with_fallback.await_args.args[1]
+        prompt = chat[0].content[1].text
+        assert "Подпись пользователя" in prompt
+        assert "что тут написано?" in prompt
+
+    async def test_wrapping_quotes_are_stripped(self, mock_llm_router) -> None:
+        fetch = AsyncMock(return_value=(b"img", "image/jpeg"))
+        mock_llm_router.generate_with_fallback.return_value = LLMResponse(
+            text="«кот спит на диване»"
+        )
+        recognizer = _recognizer(mock_llm_router, fetch)
+
+        marker = await recognizer.describe(_dto(media=_photo()))
+
+        assert marker == (
+            "[Вложение: фото | Распознано: кот спит на диване"
+            " | Детали: 800x600]"
+        )

@@ -20,6 +20,8 @@ from app.api import (
     ping_rabbitmq,
 )
 from app.api.tunnels import start_tunnel, stop_tunnel
+from app.brain.feed import FeedSourceService
+from app.brain.feed.discovery import FeedDiscoveryJob
 from app.brain.llm_choice import (
     GeminiCloudflareProvider,
     GeminiProvider,
@@ -31,6 +33,9 @@ from app.brain.memory.consolidation import ConsolidationJob
 from app.brain.memory.long import AsyncSessionLocal, engine
 from app.brain.memory.short import RedisClient
 from app.brain.memory.vector import VectorMemory
+from app.brain.repositories import HardFactsRepo
+from app.brain.search import SearchChain
+from app.brain.skills import BackgroundParserJob
 from app.brain.vision import MediaRecognizer
 from app.chats.media_fetcher import fetch_telegram_media
 from app.chats.telegram import TGSender
@@ -79,6 +84,7 @@ async def lifespan(app: FastAPI):
         max_per_batch=settings.MEDIA_MAX_PER_BATCH,
     )
 
+    feed_service = FeedSourceService(AsyncSessionLocal)
     worker = Worker(
         broker_url=settings.rabbitmq_url,
         redis_client=redis_client,
@@ -87,6 +93,7 @@ async def lifespan(app: FastAPI):
         router=router,
         vectors=vectors,
         media_recognizer=media_recognizer,
+        feed_service=feed_service,
     )
     consolidation = ConsolidationJob(
         redis_client=redis_client,
@@ -94,12 +101,51 @@ async def lifespan(app: FastAPI):
         router=router,
         vectors=vectors,
     )
+    feed_parser = BackgroundParserJob(
+        redis_client=redis_client,
+        session_factory=AsyncSessionLocal,
+        router=router,
+        vectors=vectors,
+        publisher=publisher,
+    )
+    search_chain = SearchChain.from_settings()
+    feed_discovery = FeedDiscoveryJob(
+        session_factory=AsyncSessionLocal,
+        router=router,
+        search_chain=search_chain,
+        service=feed_service,
+        publisher=publisher,
+    )
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
         consolidation.run_for_all,
         "interval",
         minutes=settings.CONSOLIDATION_SCAN_MINUTES,
         id="consolidation-scan",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        feed_parser.run,
+        "interval",
+        minutes=settings.FEED_SCAN_MINUTES,
+        id="feed-parser",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        feed_discovery.run,
+        "interval",
+        hours=settings.FEED_DISCOVERY_INTERVAL_HOURS,
+        id="feed-discovery",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        _confidence_decay,
+        "interval",
+        hours=24,
+        id="confidence-decay",
         max_instances=1,
         coalesce=True,
     )
@@ -146,11 +192,24 @@ async def lifespan(app: FastAPI):
     await bot.session.close()
     await publisher.close()
     await router.close()
+    await search_chain.close()
     await redis_client.close()
     await vectors.close()
     await engine.dispose()
     if tunnel_process is not None:
         await asyncio.to_thread(stop_tunnel, tunnel_process)
+
+
+async def _confidence_decay() -> None:
+    """Decay stale facts and drop forgotten ones (stage 7.3)."""
+    async with AsyncSessionLocal() as session:
+        updated, deleted = await HardFactsRepo(session).apply_confidence_decay(
+            after_days=settings.CONFIDENCE_DECAY_AFTER_DAYS,
+            factor=settings.CONFIDENCE_DECAY_FACTOR,
+            min_confidence=settings.CONFIDENCE_DECAY_MIN_CONFIDENCE,
+        )
+        await session.commit()
+    _lg.info(f"Confidence decay: updated={updated}, deleted={deleted}.")
 
 
 async def _fail_fast() -> None:

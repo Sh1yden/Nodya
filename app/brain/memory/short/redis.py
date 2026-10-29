@@ -26,6 +26,8 @@ _DEBOUNCE_PREFIX = "nodya:debounce"
 _AGENT_ONLINE_PREFIX = "nodya:agent_online"
 _SCHEDULED_KEY = "nodya:scheduled"
 _LINK_PREFIX = "nodya:link"
+_FEED_SEEN_PREFIX = "nodya:feed_seen"
+_QUOTA_PREFIX = "nodya:quota"
 LINK_TTL_SECONDS = 600
 _LINK_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
@@ -232,6 +234,51 @@ class RedisClient:
             keys=[_SCHEDULED_KEY], args=[now_ts, limit]
         )
         return [str(item) for item in raw_items]
+
+    # --- Feed parser dedupe (stage 7.1) ---
+
+    async def claim_feed_item(self, digest: str, ttl: int) -> bool:
+        """Atomically claim a feed entry for processing.
+
+        SET NX EX: the first caller gets True, later scans of the
+        same feed see the entry as already handled.
+
+        Args:
+            digest: Stable hash of the entry identity.
+            ttl: How long the claim is remembered, seconds.
+
+        Returns:
+            True when this caller claimed the entry.
+        """
+        return bool(
+            await self._redis.set(
+                f"{_FEED_SEEN_PREFIX}:{digest}", "1", nx=True, ex=ttl
+            )
+        )
+
+    async def consume_daily_quota(self, bucket: str, limit: int) -> bool:
+        """Count one action within the current UTC day.
+
+        INCR and EXPIRE run in one transaction so a key never lives
+        without a TTL. The first `limit` calls return True, later
+        ones False until the key rolls over to the next date.
+
+        Args:
+            bucket: Quota namespace (for example feed_notify:<id>).
+            limit: Max allowed calls per day; <= 0 forbids the action.
+
+        Returns:
+            True when this call fits into the daily limit.
+        """
+        if limit <= 0:
+            return False
+        day = datetime.now(UTC).date().isoformat()
+        key = f"{_QUOTA_PREFIX}:{bucket}:{day}"
+        async with self._redis.pipeline(transaction=True) as pipe:
+            pipe.incr(key)
+            pipe.expire(key, 24 * 60 * 60)
+            count, _ = await pipe.execute()
+        return int(count) <= limit
 
     # --- State ---
 
